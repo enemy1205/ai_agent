@@ -1,0 +1,6 @@
+flask==2.3.3
+flask-cors==4.0.0
+langchain==0.1.0
+langchain-openai==0.0.2
+requests==2.31.0
+pathlib2==2.3.7

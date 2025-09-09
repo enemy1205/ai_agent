@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+node_modules/
+logs/
+build/
+test/
+.vscode/
+.env
