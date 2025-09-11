@@ -15,10 +15,9 @@ from langchain_openai import OpenAI
 from langchain_core.callbacks import BaseCallbackHandler
 import logging
 
-# 导入共享工具
-from tools import (
-    get_all_tools, get_tool_names, get_tools_info, 
-    set_base_directory, get_base_directory
+# 导入机器人控制工具
+from robot_tools import (
+    get_all_tools, get_tool_names, get_tools_info
 )
 
 # 配置日志
@@ -85,6 +84,23 @@ class ToolResultCallbackHandler(BaseCallbackHandler):
 def create_agent(llm_endpoint="http://localhost:8000/v1") -> Any:
     """创建并初始化LangChain agent，配置工具和LLM"""
     tools = get_all_tools()
+    
+   # 添加远程 MCP 工具
+    # mcp_tools = [
+    #     MCToolWrapper(
+    #         tool_name="navigate_to_office",
+    #         mcp_server_url="http://192.168.1.100:8080/mcp",  # 替换为客户端 IP
+    #         description="导航到指定办公室（通过客户端执行）"
+    #     ),
+    #     MCToolWrapper(
+    #         tool_name="open_display_board",
+    #         mcp_server_url="http://192.168.1.100:8080/mcp",
+    #         description="打开展示白板（通过客户端执行）"
+    #     )
+    # ]
+
+    # tools.extend(mcp_tools)  # 合并本地和远程工具
+    
     logger.info(f"已创建工具: {get_tool_names()}")
 
     # 初始化LLM客户端
@@ -105,22 +121,30 @@ def create_agent(llm_endpoint="http://localhost:8000/v1") -> Any:
         tools,
         llm,
         agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-        prompt="""你是搭载在迎宾服务机器人上的AI智能体，你的名字叫Siri。请用中文回答相应我的需求。你只需对我的要求做出语言回应，涉及到真实执行的并不需要你实际去做
-        ，而是调用相应的工具函数即可，比如去某个地点拿某个东西等等，你只需要回答我相应的要求即可，无需现实世界实际执行。
+        prompt="""你是搭载在迎宾服务机器人上的AI智能体，你的名字叫Siri。请用中文回答用户的需求。你可以通过调用相应的工具函数来控制机器人的导航和机械臂操作。
+
 可用工具:
-- navigate_to_office: 当用户要求前往特定办公室房间号时使用 (例如: "521办公室")
-- navigate_to_teacher_office: 当用户要求前往教师办公室时使用 (例如: "康老师办公室", "李老师办公室")
-- open_display_board: 当用户要求打开白板、展示板或投影屏幕时使用
-- control_air_conditioner: 当用户要求打开、关闭或调节空调时使用
+- arm_control: 控制机械臂执行动作
+  - 参数: command (0=归位, 1=夹取, 2=释放, 3=搬运)
+  - 适用场景: "拿起水"、"放下杯子"、"机械臂归位"等
+- go_to_office: 导航到办公室
+  - 适用场景: "去办公室"、"到办公室去"等
+- go_to_restroom: 导航到休息室
+  - 适用场景: "去休息室"、"到休息室"等
+- go_to_corridor: 导航到走廊
+  - 适用场景: "去走廊"、"到走廊中间"等
+- complex_task: 执行组合任务（先导航再操作机械臂）
+  - 参数: location ("office"/"restroom"/"corridor"), arm_command (0-3)
+  - 适用场景: "去办公室拿瓶水"、"把水送到休息室"等
 
-当用户要求去某地做某事时，先使用相应的导航工具，然后使用设备控制工具。
+使用示例:
+- "去办公室" → 使用 go_to_office()
+- "拿起水" → 使用 arm_control(1)
+- "去办公室拿瓶水" → 使用 complex_task("office", 1)
+- "把水送到休息室" → 使用 complex_task("restroom", 3)
+- "去走廊然后放下东西" → 使用 complex_task("corridor", 2)
 
-示例:
-- "前往康老师办公室，打开白板" → 使用 navigate_to_teacher_office("康老师") 然后 open_display_board("展示白板")
-- "前往李老师办公室关闭空调" → 使用 navigate_to_teacher_office("李老师") 然后 control_air_conditioner("关闭", "26")
-- "前往521办公室" → 使用 navigate_to_office("521")
-
-始终根据用户请求使用正确的工具。""",
+根据用户的具体需求选择合适的工具。如果用户要求去某地做某事，优先使用 complex_task 工具。""",
         verbose=False,
         handle_parsing_errors=True,
         return_intermediate_steps=True  # 启用返回中间步骤

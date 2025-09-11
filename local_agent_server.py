@@ -11,7 +11,7 @@ from langchain.agents import initialize_agent, AgentType
 from langchain_openai import OpenAI
 
 # 导入共享工具
-from tools import (
+from tools_test import (
     get_all_tools, get_tool_names, 
     set_base_directory, get_base_directory
 )
