@@ -26,8 +26,7 @@ SECRET_KEY = os.getenv("TENCENTCLOUD_SECRET_KEY")
 
 if not SECRET_ID or not SECRET_KEY:
     print("错误: 请设置环境变量 TENCENTCLOUD_SECRET_ID 和 TENCENTCLOUD_SECRET_KEY", file=sys.stderr)
-    # 注意：在服务中，我们通常不 sys.exit，而是让服务启动但返回错误
-    # sys.exit(1) 
+
 
 # 默认 TTS 配置参数 (可以在请求中覆盖)
 DEFAULT_VOICE_TYPE = 101001 # 默认音色 ID

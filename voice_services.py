@@ -12,6 +12,7 @@ import sys
 import base64
 import json
 import time
+import logging
 from flask import Flask, request, jsonify
 
 # --- 腾讯云 SDK 导入 ---
@@ -33,6 +34,18 @@ from tencentcloud.tts.v20190823 import tts_client, models as tts_models
 # 从环境变量获取腾讯云密钥
 SECRET_ID = os.getenv("TENCENTCLOUD_SECRET_ID")
 SECRET_KEY = os.getenv("TENCENTCLOUD_SECRET_KEY")
+
+# 配置日志系统
+logging.basicConfig(
+    level=logging.INFO,
+    # level=logging.INFO,
+    # format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    # handlers=[
+    #     logging.StreamHandler(sys.stdout),
+    #     logging.FileHandler('voice_service.log', encoding='utf-8')
+    # ]
+)
+logger = logging.getLogger(__name__)
 
 # ASR 配置
 ASR_ENGINE_MODEL_TYPE = "16k_zh" # 适用于中文普通话
@@ -75,9 +88,9 @@ def recognize_audio_with_tencent(audio_data: bytes) -> dict:
         }
         req.from_json_string(json.dumps(params))
 
-        print("🔄 正在调用腾讯云 ASR...")
+        logger.info("🔄 正在调用 ASR...")
         resp = client.SentenceRecognition(req)
-        print("✅ 腾讯云 ASR 识别完成.")
+        logger.info("✅ ASR 识别完成.")
         return {
             "success": True,
             "result": getattr(resp, 'Result', ""),
@@ -85,10 +98,10 @@ def recognize_audio_with_tencent(audio_data: bytes) -> dict:
             "duration": getattr(resp, 'AudioDuration', None)
         }
     except AsrException as err:
-        print(f"❌ 腾讯云 ASR SDK 错误: {err}")
+        logger.error(f"❌ ASR SDK 错误: {err}")
         return {"success": False, "error": f"Tencent ASR SDK Error: {err}"}
     except Exception as e:
-        print(f"❌ ASR 其他识别错误: {e}")
+        logger.error(f"❌ ASR 其他识别错误: {e}")
         return {"success": False, "error": f"ASR General Error: {e}"}
 
 # --- TTS 核心逻辑 ---
@@ -115,9 +128,9 @@ def synthesize_text_with_tencent(text: str, voice_type: int, primary_language: i
         req.Speed = speed
         req.Codec = codec
 
-        print(f"-> 调用腾讯云 TTS: '{text[:30]}{'...' if len(text) > 30 else ''}'")
+        logger.info(f"-> 调用 TTS: '{text[:30]}{'...' if len(text) > 30 else ''}'")
         resp = client.TextToVoice(req)
-        print("<- 腾讯云 TTS 合成完成.")
+        logger.info("<- TTS 合成完成.")
 
         if resp.Audio and resp.SessionId:
             return {
@@ -129,17 +142,17 @@ def synthesize_text_with_tencent(text: str, voice_type: int, primary_language: i
                 "codec": codec
             }
         else:
-            error_msg = "腾讯云 TTS API 返回响应中没有音频数据"
-            print(f"! 错误: {error_msg}")
+            error_msg = "TTS API 返回响应中没有音频数据"
+            logger.error(f"! 错误: {error_msg}")
             return {"success": False, "error": error_msg}
 
     except TtsException as err:
         error_msg = f"Tencent Cloud TTS SDK Error: {err}"
-        print(f"! 腾讯云 TTS SDK 错误: {err}")
+        logger.error(f"!TTS SDK 错误: {err}")
         return {"success": False, "error": error_msg}
     except Exception as e:
         error_msg = f"TTS General Server Error: {e}"
-        print(f"! TTS 其他错误: {e}")
+        logger.error(f"!TTS 其他错误: {e}")
         return {"success": False, "error": error_msg}
 
 # --- Flask 路由 ---
@@ -168,17 +181,17 @@ def asr_recognize():
         return jsonify({"error": "缺少 'audio_base64' 字段"}), 400
 
     try:
-        print("-> ASR 接收到 Base64 音频数据，正在解码...")
+        logger.info("-> ASR 接收到 Base64 音频数据，正在解码...")
         # 腾讯云 SDK 内部期望的是 bytes，base64.b64decode 直接返回 bytes
         audio_data = base64.b64decode(audio_base64)
-        print(f"-> ASR 解码完成，音频数据大小: {len(audio_data)} 字节")
+        logger.info(f"-> ASR 解码完成，音频数据大小: {len(audio_data)} 字节")
 
         result = recognize_audio_with_tencent(audio_data)
         # 错误已在函数内处理
         return jsonify(result)
 
     except Exception as e:
-        print(f"! ASR 处理请求时出错: {e}")
+        logger.error(f"! ASR 处理请求时出错: {e}")
         return jsonify({"success": False, "error": f"ASR Server Error: {e}"}), 500
 
 @app.route('/tts/synthesize', methods=['POST'])
@@ -220,22 +233,22 @@ def asr_recognize_file():
 
     try:
         file_content = file.read()
-        print(f"-> ASR 文件上传识别，文件大小: {len(file_content)} 字节")
+        logger.info(f"-> ASR 文件上传识别，文件大小: {len(file_content)} 字节")
         result = recognize_audio_with_tencent(file_content)
         return jsonify(result)
 
     except Exception as e:
-        print(f"! ASR 文件处理时出错: {e}")
+        logger.error(f"! ASR 文件处理时出错: {e}")
         return jsonify({"success": False, "error": f"ASR File Error: {e}"}), 500
 
 
 if __name__ == '__main__':
     if not SECRET_ID or not SECRET_KEY:
-        print("警告: 未设置环境变量 TENCENTCLOUD_SECRET_ID 和 TENCENTCLOUD_SECRET_KEY。服务功能将受限。", file=sys.stderr)
+        logger.warning("警告: 未设置环境变量 TENCENTCLOUD_SECRET_ID 和 TENCENTCLOUD_SECRET_KEY。服务功能将受限。")
 
     # 从环境变量获取host和port，如果没有设置则使用默认值
     host = os.environ.get('FLASK_HOST', '0.0.0.0')
     port = int(os.environ.get('FLASK_PORT', 4999))
     
-    print(f"🚀 启动语音服务节点 (host={host}, port={port})...")
+    logger.info(f"🚀 启动语音服务节点 (host={host}, port={port})...")
     app.run(host=host, port=port, debug=False)

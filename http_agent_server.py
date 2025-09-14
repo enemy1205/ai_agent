@@ -14,6 +14,7 @@ from langchain.agents import initialize_agent, AgentType
 from langchain_openai import OpenAI
 from langchain_core.callbacks import BaseCallbackHandler
 import logging
+import json
 
 # 导入机器人控制工具
 from robot_tools import (
@@ -43,17 +44,34 @@ class ToolResultCallbackHandler(BaseCallbackHandler):
     def on_tool_start(self, serialized: dict, input_str: str, **kwargs) -> None:
         """工具开始执行时调用"""
         tool_name = serialized.get('name', 'unknown')
-        logger.info(f"🛠️ 工具 {tool_name} 开始执行，输入: {input_str}")
+        try:
+            safe_input = (
+                input_str if isinstance(input_str, str)
+                else json.dumps(input_str, ensure_ascii=False)
+            )
+        except Exception:
+            safe_input = str(input_str)
+        logger.info(f"🛠️ 工具 {tool_name} 开始执行，输入: {safe_input}")
         self.tool_calls.append({
             'name': tool_name,
-            'input': input_str,
+            'input': safe_input,
             'status': 'started'
         })
     
     def on_tool_end(self, output: str, **kwargs) -> None:
         """工具执行完成时调用 - 这是关键方法！"""
-        logger.info(f"✅ 工具执行完成，返回值: {output}")
-        self.tool_outputs.append(output)
+        # 规范化输出为字符串
+        if isinstance(output, dict):
+            text = output.get('message') or output.get('error')
+            if not isinstance(text, str):
+                try:
+                    text = json.dumps(output, ensure_ascii=False)
+                except Exception:
+                    text = str(output)
+        else:
+            text = str(output)
+        logger.info(f"✅ 工具执行完成，返回值: {text}")
+        self.tool_outputs.append(text)
         
         # 更新最后一个工具调用的状态
         if self.tool_calls:
@@ -214,7 +232,11 @@ def completions():
                 # 如果有工具返回值，只取每个工具结果的第一段话（第一个\n之前）
                 first_lines = []
                 for tool_output in tool_outputs:
-                    first_line = tool_output.split('\n')[0] if '\n' in tool_output else tool_output
+                    try:
+                        text = tool_output if isinstance(tool_output, str) else json.dumps(tool_output, ensure_ascii=False)
+                    except Exception:
+                        text = str(tool_output)
+                    first_line = text.split('\n')[0] if '\n' in text else text
                     first_lines.append(first_line)
                 
                 tool_results_text = "\n".join(first_lines)
@@ -378,7 +400,7 @@ def status():
     return jsonify({
         "status": "running",
         "agent_initialized": agent is not None,
-        "base_directory": str(get_base_directory()),
+        "base_directory": os.getcwd(),
         "available_tools": get_tool_names()
     })
 
@@ -428,35 +450,6 @@ def parse_arguments():
     )
     return parser.parse_args()
 
-def setup_base_directory(base_dir_arg=None):
-    """设置基础目录"""
-    # 优先级：命令行参数 > 环境变量 > 默认值
-    if base_dir_arg:
-        base_dir_path = Path(base_dir_arg).resolve()
-    elif os.getenv('AGENT_BASE_DIR'):
-        base_dir_path = Path(os.getenv('AGENT_BASE_DIR')).resolve()
-    else:
-        base_dir_path = Path("./").resolve()
-    
-    # 检查目录是否存在
-    if not base_dir_path.exists():
-        logger.warning(f"指定目录不存在，将创建: {base_dir_path}")
-        try:
-            base_dir_path.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            logger.error(f"无法创建目录 {base_dir_path}: {e}")
-            logger.info("使用当前目录作为工作目录")
-            base_dir_path = Path("./").resolve()
-    
-    # 检查目录是否可写
-    if not os.access(base_dir_path, os.W_OK):
-        logger.warning(f"目录 {base_dir_path} 不可写，使用当前目录")
-        base_dir_path = Path("./").resolve()
-    
-    # 设置工具模块的基础目录
-    set_base_directory(str(base_dir_path))
-    logger.info(f"设置工作目录: {base_dir_path}")
-    return base_dir_path
 
 def main():
     """主程序入口"""
@@ -464,15 +457,12 @@ def main():
     
     # 解析命令行参数
     args = parse_arguments()
-    
-    # 设置基础目录
-    setup_base_directory(args.base_dir)
+
     
     # 设置LLM端点
     llm_endpoint = args.llm_endpoint
     
     print("🚀 启动HTTP Agent Server...")
-    print("📁 基础目录:", get_base_directory())
     print("🧠 LLM端点:", llm_endpoint)
     print("🔧 可用工具:", get_tool_names())
     print(f"🌐 服务将在 http://{args.host}:{args.port} 启动")

@@ -14,8 +14,6 @@ import time
 from flask import Flask, request, jsonify
 
 # --- 导入你的腾讯云识别逻辑 ---
-# 假设你将原始代码中的识别部分封装成了一个函数
-# 为了方便，这里直接复制并修改了核心识别函数
 from tencentcloud.common import credential
 from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile

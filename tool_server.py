@@ -2,6 +2,8 @@ import sys
 import logging
 import paho.mqtt.client as mqtt
 import time
+import json
+from pathlib import Path
 
 # 日志配置
 logger = logging.getLogger('RobotController')
@@ -33,8 +35,8 @@ def connect_mqtt():
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     return client
 
-def _send_navigation(client, topic, x, y, yaw):
-    payload = str({"x": x, "y": y, "yaw": yaw})
+def _send_navigation(client, topic, x, y, z):
+    payload = str({"x": x, "y": y, "z": z})
     logger.info(f"发送导航指令: {topic} → {payload}")
     result = client.publish(topic, payload, qos=1)
     try:
@@ -88,6 +90,18 @@ def arm_control(command: int) -> dict:
         return {"sent": False, "error": "MQTT消息发送失败"}
 
 
+def _load_locations_config() -> dict:
+    """加载坐标配置文件 config/locations.json"""
+    try:
+        config_path = Path(__file__).parent / "config" / "locations.json"
+        if not config_path.exists():
+            config_path = Path.cwd() / "config" / "locations.json"
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"加载坐标配置失败: {e}")
+        return {}
+
 def go_to_office() -> dict:
     """
     让机器人导航到办公室（不操作机械臂）
@@ -96,7 +110,9 @@ def go_to_office() -> dict:
         {"sent": True, "message": "✅ 前往办公室指令已发送"} → 成功
         {"sent": False, "error": "原因"} → 失败
     """
-    x, y, yaw = 74.814, 77.791, -1.598
+    locations = _load_locations_config()
+    pos = locations.get("office", {})
+    x, y, z = pos.get("x", 74.814), pos.get("y", 77.791), pos.get("z", 0.0)
     client = connect_mqtt()
     client.loop_start()
     time.sleep(0.3)
@@ -104,7 +120,7 @@ def go_to_office() -> dict:
         client.loop_stop()
         return {"sent": False, "error": "MQTT连接失败"}
 
-    success = _send_navigation(client, MQTT_TOPIC_GOOFFICE, x, y, yaw)
+    success = _send_navigation(client, MQTT_TOPIC_GOOFFICE, x, y, z)
     time.sleep(0.3)
     client.loop_stop()
     client.disconnect()
@@ -123,7 +139,9 @@ def go_to_restroom() -> dict:
         {"sent": True, "message": "✅ 前往休息室指令已发送"} → 成功
         {"sent": False, "error": "原因"} → 失败
     """
-    x, y, yaw = 86.846, 92.542, 0.046
+    locations = _load_locations_config()
+    pos = locations.get("restroom", {})
+    x, y, z = pos.get("x", 86.846), pos.get("y", 92.542), pos.get("z", 0.0)
     client = connect_mqtt()
     client.loop_start()
     time.sleep(0.3)
@@ -131,7 +149,7 @@ def go_to_restroom() -> dict:
         client.loop_stop()
         return {"sent": False, "error": "MQTT连接失败"}
 
-    success = _send_navigation(client, MQTT_TOPIC_GORESTROOM, x, y, yaw)
+    success = _send_navigation(client, MQTT_TOPIC_GORESTROOM, x, y, z)
     time.sleep(0.3)
     client.loop_stop()
     client.disconnect()
@@ -150,7 +168,9 @@ def go_to_corridor() -> dict:
         {"sent": True, "message": "✅ 前往走廊指令已发送"} → 成功
         {"sent": False, "error": "原因"} → 失败
     """
-    x, y, yaw = 97.407, 55.386, 1.7
+    locations = _load_locations_config()
+    pos = locations.get("corridor", {})
+    x, y, z = pos.get("x", 97.407), pos.get("y", 55.386), pos.get("z", 0.0)
     client = connect_mqtt()
     client.loop_start()
     time.sleep(0.3)
@@ -158,7 +178,7 @@ def go_to_corridor() -> dict:
         client.loop_stop()
         return {"sent": False, "error": "MQTT连接失败"}
 
-    success = _send_navigation(client, MQTT_TOPIC_GOCORRIDOR, x, y, yaw)
+    success = _send_navigation(client, MQTT_TOPIC_GOCORRIDOR, x, y, z)
     time.sleep(0.3)
     client.loop_stop()
     client.disconnect()
