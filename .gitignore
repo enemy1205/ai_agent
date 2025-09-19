@@ -6,3 +6,6 @@ build/
 test/
 .vscode/
 .env
+wespeaker/
+speaker_db/
+test_voicebank/

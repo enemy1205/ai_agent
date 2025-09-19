@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 机器人控制工具模块
-将tool_server.py中的机器人控制函数转换为LangChain工具格式
 """
 
 import sys
