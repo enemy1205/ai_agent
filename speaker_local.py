@@ -68,6 +68,25 @@ class LocalSpeaker:
 
         self.db_dir: str = os.path.abspath(db_dir)
         _ensure_dir(self.db_dir)
+        
+        # 检查模型输出维度
+        self._check_model_dimensions()
+
+    def _check_model_dimensions(self):
+        """检查模型输出维度并打印调试信息"""
+        try:
+            # 创建一个测试输入
+            test_input = torch.randn(1, 80, 100).to(self.device)  # [batch, mel_bins, time]
+            with torch.no_grad():
+                outputs = self.model(test_input)
+                if isinstance(outputs, tuple):
+                    outputs = outputs[-1]
+                embedding_dim = outputs.shape[-1]
+                print(f"🔍 模型输出维度: {embedding_dim}")
+                self.expected_embedding_dim = embedding_dim
+        except Exception as e:
+            print(f"⚠️ 无法检查模型维度: {e}")
+            self.expected_embedding_dim = None
 
     # ----------------------- 可选参数设置 -----------------------
     def set_device(self, device: str) -> None:
@@ -141,7 +160,12 @@ class LocalSpeaker:
         import soundfile as sf
         data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=True)
         pcm = torch.from_numpy(data.T)  # [C, T]
-        return self._extract_embedding_from_pcm(pcm, sr)
+        embedding = self._extract_embedding_from_pcm(pcm, sr)
+        
+        if embedding is not None:
+            print(f"🔍 提取的嵌入向量维度: {embedding.shape}")
+        
+        return embedding
 
 
     # ----------------------- 相似度 -----------------------
@@ -165,8 +189,22 @@ class LocalSpeaker:
                             with open(meta_path, "r", encoding="utf-8") as f:
                                 meta = json.load(f)
                                 name = meta.get("name", name)
+                        
+                        # 检查维度
+                        if hasattr(self, 'expected_embedding_dim') and self.expected_embedding_dim:
+                            if vec.shape[0] != self.expected_embedding_dim:
+                                print(f"⚠️ 数据库中的嵌入向量 {name} 维度不匹配: {vec.shape[0]} vs 期望 {self.expected_embedding_dim}")
+                                # 可以选择跳过或调整维度
+                                if vec.shape[0] > self.expected_embedding_dim:
+                                    vec = vec[:self.expected_embedding_dim]
+                                    print(f"🔧 截断到期望维度: {vec.shape}")
+                                else:
+                                    print(f"❌ 跳过维度不足的向量: {name}")
+                                    continue
+                        
                         yield name, vec
-                    except Exception:
+                    except Exception as e:
+                        print(f"❌ 加载嵌入向量失败 {path}: {e}")
                         continue
 
     def _save_embedding(self, name: str, embedding: torch.Tensor) -> str:
@@ -207,11 +245,30 @@ class LocalSpeaker:
         best_name: Optional[str] = None
 
         for name, vec in self._iter_db_embeddings():
-            db_tensor = torch.from_numpy(vec)
-            score = self.cosine_similarity(query, db_tensor)
-            if score > best_score:
-                best_score = score
-                best_name = name
+            try:
+                db_tensor = torch.from_numpy(vec)
+                
+                # 检查维度是否匹配
+                if query.shape != db_tensor.shape:
+                    print(f"⚠️ 维度不匹配: query {query.shape} vs db_tensor {db_tensor.shape}")
+                    # 尝试调整维度
+                    if query.shape[0] != db_tensor.shape[0]:
+                        if query.shape[0] > db_tensor.shape[0]:
+                            # query维度更大，截断query
+                            query = query[:db_tensor.shape[0]]
+                        else:
+                            # db_tensor维度更大，截断db_tensor
+                            db_tensor = db_tensor[:query.shape[0]]
+                        print(f"🔧 调整后维度: query {query.shape} vs db_tensor {db_tensor.shape}")
+                
+                score = self.cosine_similarity(query, db_tensor)
+                if score > best_score:
+                    best_score = score
+                    best_name = name
+                    
+            except Exception as e:
+                print(f"❌ 处理说话人 {name} 时出错: {e}")
+                continue
 
         return {"name": best_name, "confidence": float(best_score)}
 

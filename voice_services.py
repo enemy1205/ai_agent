@@ -64,7 +64,7 @@ TTS_DEFAULT_CODEC = "wav"        # 输出格式
 app = Flask(__name__)
 
 # --- 说话人识别配置 ---
-SPEAKER_MODEL_DIR = os.getenv("SPEAKER_MODEL_DIR", "~/.wespeaker/")
+SPEAKER_MODEL_DIR = os.getenv("SPEAKER_MODEL_DIR", "/home/lxc/.wespeaker/chinese")
 SPEAKER_DB_DIR = os.getenv("SPEAKER_DB_DIR", "./speaker_db")
 SPEAKER_THRESHOLD = float(os.getenv("SPEAKER_THRESHOLD", "0.62"))
 SPEAKER_DEVICE = os.getenv("SPEAKER_DEVICE", "cuda:0") 
