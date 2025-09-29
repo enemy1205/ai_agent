@@ -26,14 +26,9 @@ class NavigationManager:
         self.send_cmd = 99
         self.waiting_for_end_effector = False  # 标记是否需要等待end_effector话题的消息
 
-        # 任务队列系统
-        self.task_queue = []  # 任务队列
+        # 任务队列系统（FIFO）
+        self.task_queue = []  # 任务队列（先进先出）
         self.current_task = None  # 当前执行的任务
-        self.task_priorities = {
-            'navigation': 1,  # 最高优先级
-            'arm': 2,        # 中等优先级
-            'gripper': 3     # 最低优先级
-        }
 
         # 初始化ROS节点和发布者/订阅者
         self.init_ros()
@@ -41,29 +36,17 @@ class NavigationManager:
         self.lock = threading.RLock() 
 
     def add_task(self, task_type, task_data):
-        """添加任务到队列，按优先级排序"""
+        """添加任务到队列（FIFO）"""
         with self.lock:
             task = {
                 'type': task_type,
                 'data': task_data,
-                'priority': self.task_priorities.get(task_type, 999),
                 'timestamp': time.time()
             }
-            
-            # 插入任务到正确位置（按优先级排序）
-            inserted = False
-            for i, existing_task in enumerate(self.task_queue):
-                if task['priority'] < existing_task['priority']:
-                    self.task_queue.insert(i, task)
-                    inserted = True
-                    break
-            
-            if not inserted:
-                self.task_queue.append(task)
-            
-            rospy.loginfo(f"添加任务到队列: {task_type} (优先级: {task['priority']})")
+            # FIFO：直接追加到队尾
+            self.task_queue.append(task)
+            rospy.loginfo(f"添加任务到队列: {task_type} (FIFO)")
             rospy.loginfo(f"当前队列长度: {len(self.task_queue)}")
-            
             # 如果没有当前任务，开始执行下一个任务
             if self.current_task is None:
                 self.execute_next_task()
@@ -105,9 +88,10 @@ class NavigationManager:
 
     def execute_navigation_task(self, task_data):
         """执行导航任务"""
-        x = task_data.get('x', 0)
-        y = task_data.get('y', 0)
-        yaw = task_data.get('yaw', 0)
+        # 兼容 z/yaw 字段别名：如果上层误传 z 或角度为 deg 可在服务端处理，这里仅兜底
+        x = task_data.get('x', task_data.get('lon', 0))
+        y = task_data.get('y', task_data.get('lat', 0))
+        yaw = task_data.get('yaw', task_data.get('theta', 0))
         
         rospy.loginfo(f"执行导航任务: 目标坐标({x}, {y}), 朝向: {yaw}")
         self.nav_target = {'x': x, 'y': y, 'yaw': yaw}
@@ -121,7 +105,8 @@ class NavigationManager:
 
     def execute_gripper_task(self, task_data):
         """执行机械爪任务"""
-        command = task_data.get('command', 0)
+        # 兼容 action/command 两种字段
+        command = task_data.get('command', task_data.get('action', 0))
         rospy.loginfo(f"执行机械爪任务: 命令 {command}")
         self.pub_cmd_end_effector.publish(Int32(command))
         rospy.loginfo(f"已将机械爪命令 {command} 发送到 /cmdeffector 话题")

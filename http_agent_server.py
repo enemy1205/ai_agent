@@ -103,22 +103,6 @@ def create_agent(llm_endpoint="http://localhost:8000/v1") -> Any:
     """创建并初始化LangChain agent，配置工具和LLM"""
     tools = get_all_tools()
     
-   # 添加远程 MCP 工具
-    # mcp_tools = [
-    #     MCToolWrapper(
-    #         tool_name="navigate_to_office",
-    #         mcp_server_url="http://192.168.1.100:8080/mcp",  # 替换为客户端 IP
-    #         description="导航到指定办公室（通过客户端执行）"
-    #     ),
-    #     MCToolWrapper(
-    #         tool_name="open_display_board",
-    #         mcp_server_url="http://192.168.1.100:8080/mcp",
-    #         description="打开展示白板（通过客户端执行）"
-    #     )
-    # ]
-
-    # tools.extend(mcp_tools)  # 合并本地和远程工具
-    
     logger.info(f"已创建工具: {get_tool_names()}")
 
     # 初始化LLM客户端
@@ -139,12 +123,15 @@ def create_agent(llm_endpoint="http://localhost:8000/v1") -> Any:
         tools,
         llm,
         agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-        prompt="""你是搭载在迎宾服务机器人上的AI智能体，你的名字叫Siri。请用中文回答用户的需求。你可以通过调用相应的工具函数来控制机器人的导航和机械臂操作。
+        prompt="""你是搭载在迎宾服务机器人上的AI智能体，你的名字叫Siri。请用中文回答用户的需求。你可以通过调用相应的工具函数来控制机器人的导航和机械臂/夹爪操作。
 
 可用工具:
 - arm_control: 控制机械臂执行动作
   - 参数: command (0=归位, 1=夹取, 2=释放, 3=搬运)
   - 适用场景: "拿起水"、"放下杯子"、"机械臂归位"等
+- gripper_control: 控制夹爪开合
+  - 参数: action (1=夹紧, 2=松开)
+  - 适用场景: "夹爪夹紧"、"夹爪松开" 等
 - go_to_office: 导航到办公室
   - 适用场景: "去办公室"、"到办公室去"等
 - go_to_restroom: 导航到休息室
@@ -155,6 +142,12 @@ def create_agent(llm_endpoint="http://localhost:8000/v1") -> Any:
   - 参数: location ("office"/"restroom"/"corridor"), arm_command (0-3)
   - 适用场景: "去办公室拿瓶水"、"把水送到休息室"等
 
+顺序策略（非常重要）：
+1) 如果需求涉及“去某地并做某事”，请先调用导航工具，再调用机械臂，然后根据需要调用夹爪。
+2) 仅当必须要连续执行多个工具时，按以下顺序依次调用：导航 → 机械臂 → 夹爪。
+3) 如果用户只提出单一动作（如只夹紧夹爪），则直接调用该工具，不要添加无关步骤。
+4) 工具之间不要并行调用，等待上一步完成再进行下一步。
+
 使用示例:
 - "去办公室" → 使用 go_to_office()
 - "拿起水" → 使用 arm_control(1)
@@ -162,7 +155,7 @@ def create_agent(llm_endpoint="http://localhost:8000/v1") -> Any:
 - "把水送到休息室" → 使用 complex_task("restroom", 3)
 - "去走廊然后放下东西" → 使用 complex_task("corridor", 2)
 
-根据用户的具体需求选择合适的工具。如果用户要求去某地做某事，优先使用 complex_task 工具。""",
+根据用户的具体需求选择合适的工具。若用户要求“去某地做某事”，请显式先导航再执行机械臂/夹爪；若已有更细分的步骤，则按导航→机械臂→夹爪的顺序分步调用工具。""",
         verbose=False,
         handle_parsing_errors=True,
         return_intermediate_steps=True  # 启用返回中间步骤
