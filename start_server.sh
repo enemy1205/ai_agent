@@ -100,7 +100,7 @@ mkdir -p "$LOG_DIR"
 wait_for_http() {
 	URL="$1"
 	TIMEOUT_SECONDS="$2"
-	INTERVAL=5
+	INTERVAL=10
 	ELAPSED=0
 	while (( ELAPSED < TIMEOUT_SECONDS )); do
 		if curl -sSf "$URL" > /dev/null; then
@@ -126,7 +126,7 @@ if ! curl -s "$LLM_ENDPOINT/health" > /dev/null; then
 		--host $LLM_HOST \
 		--port $LLM_PORT" > "$LOG_DIR/llm.log" 2>&1 &
 	LLM_PID=$!
-	if wait_for_http "$LLM_ENDPOINT/health" 90; then
+	if wait_for_http "$LLM_ENDPOINT/health" 120; then
 		echo "✅ LLM已就绪: $LLM_ENDPOINT"
 	else
 		echo "⚠️  LLM启动后仍未在超时内就绪，请检查 $LOG_DIR/llm.log"

@@ -130,7 +130,7 @@ def create_agent(llm_endpoint="http://localhost:8000/v1") -> Any:
   - 参数: command (0=归位, 1=夹取, 2=释放, 3=搬运)
   - 适用场景: "拿起水"、"放下杯子"、"机械臂归位"等
 - gripper_control: 控制夹爪开合
-  - 参数: action (1=夹紧, 2=松开)
+  - 参数: command (1=夹紧, 2=松开)
   - 适用场景: "夹爪夹紧"、"夹爪松开" 等
 - go_to_office: 导航到办公室
   - 适用场景: "去办公室"、"到办公室去"等

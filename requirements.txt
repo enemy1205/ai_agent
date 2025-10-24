@@ -27,7 +27,7 @@ soundfile>=0.12.1
 librosa>=0.10.0
 
 # 说话人识别相关 - WeSpeaker语音识别系统
-wespeaker
+# wespeaker
 kaldiio==2.17.2
 PyYAML>=6.0
 scikit-learn

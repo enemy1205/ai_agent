@@ -28,7 +28,7 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
 # MQTT 配置
-MQTT_BROKER = "10.194.142.142"
+MQTT_BROKER = "10.194.143.50"
 MQTT_PORT = 1883
 MQTT_TOPIC_GOOFFICE = "robot/navigation/gooffice"
 MQTT_TOPIC_GORESTROOM = "robot/navigation/gorestroom"
@@ -119,9 +119,9 @@ def _send_arm_command(client, topic, command):
         logger.error(f"未知错误: {e}")
         return False
 
-def _send_gripper_command(client, topic, action):
-    payload = json.dumps({"action": action})
-    logger.debug(f"发送夹爪指令: {action} → {payload}")
+def _send_gripper_command(client, topic, command):
+    payload = json.dumps({"command": command})
+    logger.debug(f"发送夹爪指令: {command} → {payload}")
     try:
         result = client.publish(topic, payload, qos=1)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
@@ -196,12 +196,12 @@ def arm_control(command: int) -> dict:
     else:
         return _result(False, "MQTT消息发送失败", {"command": command})
 
-def gripper_control(action: int) -> dict:
+def gripper_control(command: int) -> dict:
     """
     控制夹爪开合动作（仅控制夹爪的夹紧和松开）
     适用场景：用户说"夹爪夹紧"、"夹爪松开"、"夹取物品"、"放开物品"等，需要控制夹爪开合时调用。
     注意：此工具只控制夹爪开合，机械臂整体动作请使用arm_control工具。
-    参数 action:
+    参数 command:
         1 → 夹爪夹紧（夹取物品）
         2 → 夹爪松开（释放物品）
     返回:
@@ -209,12 +209,12 @@ def gripper_control(action: int) -> dict:
     """
     # 确保参数是整数类型
     try:
-        action = int(action)
+        command = int(command)
     except (ValueError, TypeError):
-        return {"sent": False, "error": f"action 参数类型错误: {type(action)}, 值: {action}"}
+        return {"sent": False, "error": f"command 参数类型错误: {type(command)}, 值: {command}"}
     
-    if action not in [1, 2]:
-        return _result(False, "参数错误: action 必须是 1/2", {"action": action})
+    if command not in [1, 2]:
+        return _result(False, "参数错误: command 必须是 1/2", {"command": command})
 
     client = connect_mqtt()
     if client is None:
@@ -226,16 +226,16 @@ def gripper_control(action: int) -> dict:
         client.loop_stop()
         return _result(False, "MQTT连接失败")
 
-    success = _send_gripper_command(client, MQTT_TOPIC_GRIPPER_CONTROL, action)
+    success = _send_gripper_command(client, MQTT_TOPIC_GRIPPER_CONTROL, command)
     time.sleep(0.3)
     client.loop_stop()
     client.disconnect()
 
-    desc = {1: "夹紧", 2: "松开"}[action]
+    desc = {1: "夹紧", 2: "松开"}[command]
     if success:
-        return _result(True, f"已发送夹爪『{desc}』指令", {"action": action})
+        return _result(True, f"已发送夹爪『{desc}』指令", {"command": command})
     else:
-        return _result(False, "MQTT消息发送失败", {"action": action})
+        return _result(False, "MQTT消息发送失败", {"command": command})
 
 def _load_locations_config() -> dict:
     """加载坐标配置文件 config/locations.json"""
@@ -441,7 +441,7 @@ GripperControlTool = StructuredTool.from_function(
         "仅控制夹爪开合, 不改变机械臂姿态也不移动底盘。"
         "使用时机: 当用户明确要求夹紧或松开时使用。"
         "禁止: 不要为了夹取或放置而主动触发导航或机械臂姿态变化。"
-        "参数: action 1 夹紧, 2 松开。"
+        "参数: command 1 夹紧, 2 松开。"
         "返回字段: ok, text, meta。"
     ),
 )

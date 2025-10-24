@@ -26,9 +26,14 @@ class NavigationManager:
         self.send_cmd = 99
         self.waiting_for_end_effector = False  # 标记是否需要等待end_effector话题的消息
 
-        # 任务队列系统（FIFO）
-        self.task_queue = []  # 任务队列（先进先出）
+        # 任务队列系统
+        self.task_queue = []  # 任务队列
         self.current_task = None  # 当前执行的任务
+        self.task_priorities = {
+            'navigation': 1,  # 最高优先级
+            'arm': 2,        # 中等优先级
+            'gripper': 3     # 最低优先级
+        }
 
         # 初始化ROS节点和发布者/订阅者
         self.init_ros()
@@ -36,17 +41,29 @@ class NavigationManager:
         self.lock = threading.RLock() 
 
     def add_task(self, task_type, task_data):
-        """添加任务到队列（FIFO）"""
+        """添加任务到队列，按优先级排序"""
         with self.lock:
             task = {
                 'type': task_type,
                 'data': task_data,
+                'priority': self.task_priorities.get(task_type, 999),
                 'timestamp': time.time()
             }
-            # FIFO：直接追加到队尾
-            self.task_queue.append(task)
-            rospy.loginfo(f"添加任务到队列: {task_type} (FIFO)")
+            
+            # 插入任务到正确位置（按优先级排序）
+            inserted = False
+            for i, existing_task in enumerate(self.task_queue):
+                if task['priority'] < existing_task['priority']:
+                    self.task_queue.insert(i, task)
+                    inserted = True
+                    break
+            
+            if not inserted:
+                self.task_queue.append(task)
+            
+            rospy.loginfo(f"添加任务到队列: {task_type} (优先级: {task['priority']})")
             rospy.loginfo(f"当前队列长度: {len(self.task_queue)}")
+            
             # 如果没有当前任务，开始执行下一个任务
             if self.current_task is None:
                 self.execute_next_task()
@@ -88,10 +105,9 @@ class NavigationManager:
 
     def execute_navigation_task(self, task_data):
         """执行导航任务"""
-        # 兼容 z/yaw 字段别名：如果上层误传 z 或角度为 deg 可在服务端处理，这里仅兜底
-        x = task_data.get('x', task_data.get('lon', 0))
-        y = task_data.get('y', task_data.get('lat', 0))
-        yaw = task_data.get('yaw', task_data.get('theta', 0))
+        x = task_data.get('x', 0)
+        y = task_data.get('y', 0)
+        yaw = task_data.get('yaw', 0)
         
         rospy.loginfo(f"执行导航任务: 目标坐标({x}, {y}), 朝向: {yaw}")
         self.nav_target = {'x': x, 'y': y, 'yaw': yaw}
@@ -105,8 +121,7 @@ class NavigationManager:
 
     def execute_gripper_task(self, task_data):
         """执行机械爪任务"""
-        # 兼容 action/command 两种字段
-        command = task_data.get('command', task_data.get('action', 0))
+        command = task_data.get('command', 1)
         rospy.loginfo(f"执行机械爪任务: 命令 {command}")
         self.pub_cmd_end_effector.publish(Int32(command))
         rospy.loginfo(f"已将机械爪命令 {command} 发送到 /cmdeffector 话题")
@@ -174,7 +189,7 @@ class NavigationManager:
     def check_and_execute(self):
         """根据导航状态执行相应操作（支持独立机械臂命令）"""
         # 这个方法现在主要用于向后兼容，实际任务执行由队列系统管理
-        if self.nav_status == 2:
+        if self.nav_status in [1, 2]:
             if self.nav_target is not None:
                 self.publish_goal()  # 有导航目标则发布
             elif self.nav_target is None and self.command is not None:
@@ -440,15 +455,15 @@ def handle_gripper_command(payload):
     rospy.loginfo("开始处理机械爪控制指令")
     
     if isinstance(payload, dict):
-        command = payload.get('command', 0)
+        command = payload.get('command', 1)
         # 验证命令有效性（机械爪通常有开合两种状态）
-        if command not in [0, 1]:
-            rospy.logwarn(f"无效的机械爪命令: {command}（必须为0或1）")
+        if command not in [1,2]:
+            rospy.logwarn(f"无效的机械爪命令: {command}（必须为1或2）")
             return
         
         # 命令描述
         command_desc = {
-            0: "张开",
+            2: "张开",
             1: "闭合"
         }[command]
         rospy.loginfo(f"机械爪命令: {command_desc}（指令值: {command}）")

@@ -43,10 +43,7 @@ LLM_SERVER_PORT = 5000           # <-- 修改为你的大模型服务端口
 LLM_API_BASE = f"http://{LLM_SERVER_IP}:{LLM_SERVER_PORT}/v1"
 LLM_ENDPOINT = f"{LLM_API_BASE}/completions"
 
-# LLM参数配置
-MAX_TOKENS = 500
-TEMPERATURE = 0.8
-TOP_P = 0.95
+# LLM参数配置 - 现在由服务器端统一管理
 
 # 系统提示词 (可选)
 # SYSTEM_PROMPT = "你是搭载在迎宾服务机器人上的AI智能体，你的名字叫Siri。请用中文回答相应我的需求。你只需对我的要求做出语言回应，涉及到真实执行的并不需要你实际去做，比如抱或者拿某个东西等等，你只需要回答我。"
@@ -363,17 +360,14 @@ def handle_captured_speech(audio_data_float32, sample_rate):
     print(f"✅ 认证通过: id={name}, confidence={conf:.2f}，开始LLM处理...")
     process_with_llm(recognized_text)
 
-def call_local_llm(prompt, max_tokens=MAX_TOKENS, temperature=TEMPERATURE, top_p=TOP_P):
+def call_local_llm(prompt):
     """
     调用本地部署的大模型服务
     """
     try:
-        # 构建请求数据
+        # 构建请求数据 - 不传参数，让服务器端使用自己的配置
         data = {
             "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
             "stop": ["\n\n", "Human:", "Assistant:"]
         }
         
