@@ -30,7 +30,7 @@ MIN_SILENCE_DURATION_MS = 300 # 语音结束判断所需的最小静音时长 (�
 SPEECH_PAD_MS = 100         # 在语音开始前/结束后填充的静音时长 (毫秒)
 
 # 服务器地址配置
-VOICE_SERVER_IP = "202.38.209.227"
+VOICE_SERVER_IP = "202.38.214.151"
 VOICE_SERVER_PORT = 4999
 VOICE_SERVER_BASE_URL = f"http://{VOICE_SERVER_IP}:{VOICE_SERVER_PORT}"
 ASR_ENDPOINT = f"{VOICE_SERVER_BASE_URL}/asr/recognize"
@@ -38,7 +38,7 @@ TTS_ENDPOINT = f"{VOICE_SERVER_BASE_URL}/tts/synthesize"
 SPEAKER_VERIFY_ENDPOINT = f"{VOICE_SERVER_BASE_URL}/speaker/verify"
 
 # 本地LLM服务配置
-LLM_SERVER_IP = "202.38.209.227" # <-- 修改为你的大模型服务IP
+LLM_SERVER_IP = "202.38.214.151" # <-- 修改为你的大模型服务IP
 LLM_SERVER_PORT = 5000           # <-- 修改为你的大模型服务端口
 LLM_API_BASE = f"http://{LLM_SERVER_IP}:{LLM_SERVER_PORT}/v1"
 LLM_ENDPOINT = f"{LLM_API_BASE}/completions"
@@ -60,74 +60,100 @@ playback_stream = None # 用于播放 TTS 音频的 PyAudio 流
 
 # --- 防止音频反馈循环的标志 ---
 is_playing_tts = False
+playback_lock = threading.Lock()  # 播放锁，确保同一时间只有一个音频在播放
 
 # --- 对话历史 ---
 conversation_history = []
 
 # --- 声纹认证控制 ---
-ENABLE_SPEAKER_AUTH = os.getenv("ENABLE_SPEAKER_AUTH", "true").lower() == "true"  # 声纹认证开关
+ENABLE_SPEAKER_AUTH = os.getenv("ENABLE_SPEAKER_AUTH", "false").lower() == "true"  # 声纹认证开关
 is_register_mode = False  # 注册模式标志
 pending_register_id = None  # 待注册的用户ID
 
 def audio_callback(in_data, frame_count, time_info, status):
     """PyAudio 回调函数，将录音数据放入队列"""
-    audio_chunk = np.frombuffer(in_data, dtype=np.float32)
-    audio_queue.put(audio_chunk)
+    if status:
+        print(f"[音频回调警告] status: {status}")
+    
+    try:
+        audio_chunk = np.frombuffer(in_data, dtype=np.float32)
+        audio_queue.put(audio_chunk)
+    except Exception as e:
+        print(f"[音频回调错误] {e}")
+    
     return (in_data, pyaudio.paContinue)
 
 def play_audio_from_base64(audio_base64_str, sample_rate=16000, codec="wav"):
     """播放 Base64 编码的音频数据"""
-    global pyaudio_instance, playback_stream, is_playing_tts
-    try:
-        if not audio_base64_str:
-            print("! TTS 返回的音频数据为空")
-            return
+    global pyaudio_instance, playback_stream, is_playing_tts, playback_lock
+    
+    # 使用锁确保同一时间只有一个线程在播放音频
+    with playback_lock:
+        try:
+            if not audio_base64_str:
+                print("! TTS 返回的音频数据为空")
+                return
 
-        print("-> 开始播放 TTS 音频，暂停麦克风监听...")
-        is_playing_tts = True
+            is_playing_tts = True
 
-        # 1. 解码 Base64
-        print("-> 正在解码 TTS 返回的 Base64 音频数据...")
-        audio_bytes = base64.b64decode(audio_base64_str)
-        print(f"-> 解码完成，音频数据大小: {len(audio_bytes)} 字节")
+            # 1. 解码 Base64
+            audio_bytes = base64.b64decode(audio_base64_str)
 
-        # 2. 确定播放参数 (简化处理)
-        if codec.lower() in ["wav", "pcm"]:
-            audio_format = pyaudio.paInt16
-            width = 2
-        elif codec.lower() == "mp3":
-            print("⚠️  注意: 客户端直接播放 MP3 需要额外解码库 (如 pydub)。这里假设数据是 PCM。")
-            audio_format = pyaudio.paInt16
-            width = 2
-        else:
-            print(f"! 不支持的音频格式用于播放: {codec}")
-            is_playing_tts = False
-            return
+            # 2. 确定播放参数 (简化处理)
+            if codec.lower() in ["wav", "pcm"]:
+                audio_format = pyaudio.paInt16
+                width = 2
+            elif codec.lower() == "mp3":
+                print("⚠️  注意: 客户端直接播放 MP3 需要额外解码库 (如 pydub)。这里假设数据是 PCM。")
+                audio_format = pyaudio.paInt16
+                width = 2
+            else:
+                print(f"! 不支持的音频格式用于播放: {codec}")
+                is_playing_tts = False
+                return
 
-        # 3. 打开播放流 (如果尚未打开或已关闭)
-        if not playback_stream or playback_stream.is_stopped():
+            # 3. 关闭旧的播放流并重新打开（避免 underrun）
+            if playback_stream and not playback_stream.is_stopped():
+                try:
+                    playback_stream.stop_stream()
+                    playback_stream.close()
+                except:
+                    pass
+            
             if not pyaudio_instance:
-                 print("! PyAudio 实例未初始化，无法播放音频。")
-                 is_playing_tts = False
-                 return
+                print("! PyAudio 实例未初始化，无法播放音频。")
+                is_playing_tts = False
+                return
+                
             playback_stream = pyaudio_instance.open(
                 format=audio_format,
                 channels=1,
                 rate=sample_rate,
-                output=True
+                output=True,
+                frames_per_buffer=1024
             )
-            print("-> 已打开音频播放流。")
 
-        # 4. 播放音频数据
-        print("🔊 开始播放 TTS 音频...")
-        playback_stream.write(audio_bytes)
-        print("✅ TTS 音频播放完毕。")
+            # 4. 播放音频数据
+            print("🔊 播放回复中...")
+            playback_stream.write(audio_bytes)
+            
+            # 5. 播放完毕后关闭流
+            playback_stream.stop_stream()
+            playback_stream.close()
+            playback_stream = None
 
-    except Exception as e:
-        print(f"! 播放音频时出错: {e}")
-    finally:
-        print("-> TTS 播放结束，恢复麦克风监听。")
-        is_playing_tts = False
+        except Exception as e:
+            print(f"! 播放音频时出错: {e}")
+            # 出错时尝试清理播放流
+            if playback_stream:
+                try:
+                    playback_stream.stop_stream()
+                    playback_stream.close()
+                    playback_stream = None
+                except:
+                    pass
+        finally:
+            is_playing_tts = False
 
 def send_audio_to_asr_server(audio_data_float32, sample_rate):
     """
@@ -152,12 +178,10 @@ def send_audio_to_asr_server(audio_data_float32, sample_rate):
         }
         headers = {'Content-Type': 'application/json'}
 
-        print(f"-> 正在发送 {len(audio_data_float32) / sample_rate:.2f} 秒的语音数据到 ASR (Base64 长度: {len(audio_base64)})...")
         response = requests.post(ASR_ENDPOINT, json=payload, headers=headers, timeout=15)
 
         if response.status_code == 200:
             data = response.json()
-            print(f"<- ASR 服务器响应: {data}")
             if data.get("success"):
                 recognized_text = data.get("result", "").strip()
                 if recognized_text:
@@ -199,7 +223,6 @@ def send_audio_to_asr_server_and_get_text(audio_data_float32, sample_rate):
         }
         headers = {'Content-Type': 'application/json'}
 
-        print(f"-> 正在发送 {len(audio_data_float32) / sample_rate:.2f} 秒的语音数据到 ASR...")
         response = requests.post(ASR_ENDPOINT, json=payload, headers=headers, timeout=15)
 
         if response.status_code == 200:
@@ -331,7 +354,7 @@ def handle_captured_speech(audio_data_float32, sample_rate):
     if "注册新用户" in recognized_text:
         print("📝 检测到注册新用户指令，进入注册模式")
         is_register_mode = True
-        pending_register_id = f"user_{int(time.time())}"  # 生成临时用户ID
+        pending_register_id = f"user_{int(time.time())}"
         send_text_to_tts(f"请说一段话用于注册，您的用户ID是 {pending_register_id}")
         return
     
@@ -353,11 +376,11 @@ def handle_captured_speech(audio_data_float32, sample_rate):
     # 5. 进行声纹认证
     is_ok, name, conf = verify_speaker_before_asr(audio_data_float32, sample_rate)
     if not is_ok:
-        print("🔒 未注册用户，拒绝后续处理")
+        print("🔒 未注册用户，拒绝处理")
         send_text_to_tts("用户尚未注册")
         return
     
-    print(f"✅ 认证通过: id={name}, confidence={conf:.2f}，开始LLM处理...")
+    print(f"✅ 认证通过: {name} (置信度: {conf:.2f})")
     process_with_llm(recognized_text)
 
 def call_local_llm(prompt):
@@ -387,7 +410,6 @@ def call_local_llm(prompt):
             result = response.json()
             if "choices" in result and len(result["choices"]) > 0:
                 reply_text = result["choices"][0]["text"].strip()
-                print("✅ LLM服务调用成功")
                 return reply_text, True
             else:
                 print("❌ LLM服务返回格式异常")
@@ -450,42 +472,28 @@ def process_with_llm(user_input):
         return
 
     if user_input.lower() in ['quit', 'exit', '退出', '再见']:
-        print("👋 用户请求退出!")
-        # 可以在这里添加退出逻辑，例如设置一个退出标志
-        # 为了简化，我们只打印信息
-        # 你可以设置一个全局标志 `should_exit = True` 并在 main_loop 中检查
-        goodbye_text = "好的，再见！"
-        # 直接调用TTS播放告别语
-        send_text_to_tts(goodbye_text)
+        send_text_to_tts("好的，再见！")
         return
 
-    print("🧠 正在思考...")
+    print("🧠 思考中...")
     reply, conversation_history = chat_with_local_llm(user_input, conversation_history)
     
     if not reply:
-        print("❌ 模型未能生成回复。")
-        error_reply = "抱歉，我没有听清楚，请再说一遍。"
-        send_text_to_tts(error_reply)
+        send_text_to_tts("抱歉，我没有听清楚，请再说一遍。")
         return
 
-    print(f"🤖 模型回复: {reply}")
-    # 将LLM的回复发送给TTS服务
+    print(f"🤖 回复: {reply}")
     send_text_to_tts(reply)
 
 def send_text_to_tts(text):
     """将文本发送到 TTS 服务并播放返回的音频"""
     if not text.strip():
-        print("-> TTS 文本为空，跳过合成。")
         return
 
     try:
-        payload = {
-            "text": text,
-            # 可以添加其他 TTS 参数
-        }
+        payload = {"text": text}
         headers = {'Content-Type': 'application/json'}
 
-        print(f"-> 正在向 TTS 服务发送文本: '{text}'")
         response = requests.post(TTS_ENDPOINT, json=payload, headers=headers, timeout=15)
 
         if response.status_code == 200:
@@ -494,13 +502,11 @@ def send_text_to_tts(text):
                 audio_b64 = data.get("audio_base64")
                 sample_rate = data.get("sample_rate", SAMPLE_RATE)
                 codec = data.get("codec", "wav")
-                print(f"<- TTS 服务响应成功。")
-                # 播放音频
                 play_audio_from_base64(audio_b64, sample_rate, codec)
             else:
-                print(f"<- TTS 服务返回错误: {data.get('error')}")
+                print(f"! TTS 服务返回错误: {data.get('error')}")
         else:
-            print(f"<- TTS 服务响应错误 ({response.status_code}): {response.text}")
+            print(f"! TTS 服务响应错误 ({response.status_code})")
 
     except requests.exceptions.RequestException as e:
         print(f"! 发送 TTS 请求时出错: {e}")
@@ -512,6 +518,7 @@ def main_loop():
     global is_speaking, speech_buffer
 
     print("开始监听麦克风... (按 Ctrl+C 停止)")
+    
     try:
         while stream.is_active():
             if not audio_queue.empty():
@@ -526,12 +533,11 @@ def main_loop():
 
                 if speech_dict:
                     if 'start' in speech_dict:
-                        print(">>> 检测到说话开始")
+                        print(">>> 检测到语音")
                         is_speaking = True
                         speech_buffer = []
 
                     if 'end' in speech_dict:
-                        print("<<< 检测到说话结束")
                         is_speaking = False
                         if len(speech_buffer) > 0:
                             full_speech = np.concatenate(speech_buffer)
@@ -555,13 +561,24 @@ def main_loop():
     finally:
         # 清理资源
         if stream:
-            stream.stop_stream()
-            stream.close()
+            try:
+                if not stream.is_stopped():
+                    stream.stop_stream()
+                stream.close()
+            except:
+                pass
         if playback_stream:
-            playback_stream.stop_stream()
-            playback_stream.close()
+            try:
+                if not playback_stream.is_stopped():
+                    playback_stream.stop_stream()
+                playback_stream.close()
+            except:
+                pass
         if pyaudio_instance:
-            pyaudio_instance.terminate()
+            try:
+                pyaudio_instance.terminate()
+            except:
+                pass
         print("资源已释放。")
 
 def test_server_connections():
@@ -605,6 +622,26 @@ def test_server_connections():
         print(f"❌ 无法连接到 LLM 服务 ({LLM_ENDPOINT})")
 
 
+def list_audio_devices():
+    """列出所有可用的音频设备"""
+    p = pyaudio.PyAudio()
+    print("\n🎧 可用音频设备列表:")
+    print("-" * 80)
+    default_input = p.get_default_input_device_info()
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        if info['maxInputChannels'] > 0:  # 只显示输入设备
+            is_default = " [默认]" if i == default_input['index'] else ""
+            print(f"  [{i}] {info['name']}{is_default}")
+            print(f"      采样率: {int(info['defaultSampleRate'])} Hz, "
+                  f"输入通道: {info['maxInputChannels']}")
+    print("-" * 80)
+    print(f"✅ 将使用默认设备: [{default_input['index']}] {default_input['name']}")
+    # 提示：如果需要使用特定设备，可以通过 PulseAudio 设置默认源：
+    # pacmd set-default-source <设备名称>
+    p.terminate()
+    return default_input['index']
+
 if __name__ == "__main__":
     # 0. 显示配置信息
     print("=" * 50)
@@ -616,12 +653,15 @@ if __name__ == "__main__":
     # 1. 测试服务器连接
     test_server_connections()
 
-    # 2. 加载 Silero VAD 模型
+    # 2. 列出音频设备
+    default_device_index = list_audio_devices()
+    
+    # 3. 加载 Silero VAD 模型
     print("正在加载 Silero VAD 模型...")
     model = load_silero_vad(onnx=True)
     print(f"模型加载完成: {type(model)}")
     
-    # 3. 创建 VAD Iterator
+    # 4. 创建 VAD Iterator
     vad_iterator = VADIterator(
         model,
         threshold=VAD_THRESHOLD,
@@ -630,18 +670,40 @@ if __name__ == "__main__":
         speech_pad_ms=SPEECH_PAD_MS
     )
 
-    # 4. 初始化 PyAudio 和音频流
+    # 5. 初始化 PyAudio 和音频流
     pyaudio_instance = pyaudio.PyAudio()
-    stream = pyaudio_instance.open(
-        format=FORMAT,
-        channels=CHANNELS,
-        rate=SAMPLE_RATE,
-        input=True,
-        frames_per_buffer=CHUNK,
-        stream_callback=audio_callback
-    )
+    
+    # 获取设备详细信息以便确认
+    device_info = pyaudio_instance.get_device_info_by_index(default_device_index)
+    print(f"\n🎤 正在打开麦克风设备:")
+    print(f"   设备索引: {default_device_index}")
+    print(f"   设备名称: {device_info['name']}")
+    print(f"   格式: Float32, 采样率: {SAMPLE_RATE} Hz, 通道: {CHANNELS}, 块大小: {CHUNK}")
+    
+    try:
+        stream = pyaudio_instance.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=SAMPLE_RATE,
+            input=True,
+            input_device_index=default_device_index,
+            frames_per_buffer=CHUNK,
+            stream_callback=audio_callback
+        )
+        
+        # 确保流已启动
+        if not stream.is_active():
+            print("⚠️  音频流未激活，正在启动...")
+            stream.start_stream()
+        
+        print("✅ 音频流已成功启动")
+        
+    except Exception as e:
+        print(f"❌ 打开音频流失败: {e}")
+        pyaudio_instance.terminate()
+        exit(1)
 
-    # 5. 启动主循环
+    # 6. 启动主循环
     main_loop()
 
 

@@ -28,12 +28,11 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
 # MQTT 配置
-MQTT_BROKER = "10.194.143.50"
+MQTT_BROKER = "10.194.142.104"
 MQTT_PORT = 1883
-MQTT_TOPIC_GOOFFICE = "robot/navigation/gooffice"
-MQTT_TOPIC_GORESTROOM = "robot/navigation/gorestroom"
-MQTT_TOPIC_GOCORRIDOR = "robot/navigation/gocorridor"
+MQTT_TOPIC_NAVIGATION = "robot/navigation"
 MQTT_TOPIC_ARM_CONTROL = "robot/arm/control"
+MQTT_TOPIC_ARM_COORDINATE = "robot/arm/coordinate"
 MQTT_TOPIC_GRIPPER_CONTROL = "robot/gripper/control"
 
 # ========== MQTT通信函数 ==========
@@ -73,11 +72,19 @@ def connect_mqtt():
         logger.error(f"MQTT连接失败: {e}")
         return None
 
-def _send_navigation(client, topic, x, y, z):
-    payload = json.dumps({"x": x, "y": y, "z": z})
-    logger.debug(f"发送导航指令: {topic} → {payload}")
+def _send_navigation(client, topic, x, y, z, orientation=None):
+    """
+    发送导航指令
+    orientation: 可选的四元数字典 {"x": 0, "y": 0, "z": 0, "w": 1}
+    """
+    payload = {"x": x, "y": y, "z": z}
+    if orientation is not None:
+        payload["orientation"] = orientation
+    
+    payload_str = json.dumps(payload)
+    logger.debug(f"发送导航指令: {topic} → {payload_str}")
     try:
-        result = client.publish(topic, payload, qos=1)
+        result = client.publish(topic, payload_str, qos=1)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             # 使用更短的超时时间
             result.wait_for_publish(timeout=2)
@@ -119,6 +126,28 @@ def _send_arm_command(client, topic, command):
         logger.error(f"未知错误: {e}")
         return False
 
+def _send_arm_coordinate_command(client, topic, x, y, z, rx, ry, rz):
+    payload = json.dumps({"x": x, "y": y, "z": z, "rx": rx, "ry": ry, "rz": rz})
+    logger.debug(f"发送机械臂坐标指令: {topic} → {payload}")
+    try:
+        result = client.publish(topic, payload, qos=1)
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            result.wait_for_publish(timeout=2)
+            logger.debug("发布成功")
+            return True
+        else:
+            logger.error(f"发布失败，错误码: {result.rc}")
+            return False
+    except TimeoutError:
+        logger.warning("发布超时")
+        return False
+    except RuntimeError as e:
+        logger.error(f"发布失败: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"未知错误: {e}")
+        return False
+
 def _send_gripper_command(client, topic, command):
     payload = json.dumps({"command": command})
     logger.debug(f"发送夹爪指令: {command} → {payload}")
@@ -141,6 +170,7 @@ def _send_gripper_command(client, topic, command):
     except Exception as e:
         logger.error(f"未知错误: {e}")
         return False
+
 
 # ========== 机器人控制工具函数 ==========
 
@@ -195,6 +225,44 @@ def arm_control(command: int) -> dict:
         return _result(True, f"已发送机械臂『{desc}』指令", {"command": command})
     else:
         return _result(False, "MQTT消息发送失败", {"command": command})
+
+def arm_control_coordinate(x: float, y: float, z: float, rx: float, ry: float, rz: float) -> dict:
+    """
+    控制机械臂到指定坐标位置和姿态
+    适用场景：需要精确控制机械臂位置和姿态时使用，如定点抓取、精确放置等。
+    参数:
+        x, y, z: 机械臂末端位置坐标 (mm)
+        rx, ry, rz: 机械臂末端姿态角度 (度)
+    返回:
+        {"ok": bool, "text": str, "meta": dict}
+    """
+    # 确保参数是数值类型
+    try:
+        x, y, z = float(x), float(y), float(z)
+        rx, ry, rz = float(rx), float(ry), float(rz)
+    except (ValueError, TypeError) as e:
+        return _result(False, f"坐标参数类型错误: {e}")
+
+    client = connect_mqtt()
+    if client is None:
+        return _result(False, "MQTT连接失败")
+    
+    client.loop_start()
+    time.sleep(0.3)
+    if not client.is_connected():
+        client.loop_stop()
+        return _result(False, "MQTT连接失败")
+
+    success = _send_arm_coordinate_command(client, MQTT_TOPIC_ARM_COORDINATE, x, y, z, rx, ry, rz)
+    time.sleep(0.3)
+    client.loop_stop()
+    client.disconnect()
+
+    if success:
+        return _result(True, f"已发送机械臂坐标指令: 位置({x:.1f}, {y:.1f}, {z:.1f}), 姿态({rx:.1f}, {ry:.1f}, {rz:.1f})", 
+                      {"x": x, "y": y, "z": z, "rx": rx, "ry": ry, "rz": rz})
+    else:
+        return _result(False, "MQTT消息发送失败", {"x": x, "y": y, "z": z, "rx": rx, "ry": ry, "rz": rz})
 
 def gripper_control(command: int) -> dict:
     """
@@ -260,6 +328,7 @@ def go_to_office() -> dict:
     locations = _load_locations_config()
     pos = locations.get("office", {})
     x, y, z = pos.get("x", 74.814), pos.get("y", 77.791), pos.get("z", 0.0)
+    orientation = pos.get("orientation", None)
     client = connect_mqtt()
     if client is None:
         return _result(False, "MQTT连接失败")
@@ -269,13 +338,13 @@ def go_to_office() -> dict:
         client.loop_stop()
         return _result(False, "MQTT连接失败")
 
-    success = _send_navigation(client, MQTT_TOPIC_GOOFFICE, x, y, z)
+    success = _send_navigation(client, MQTT_TOPIC_NAVIGATION, x, y, z, orientation)
     time.sleep(0.3)
     client.loop_stop()
     client.disconnect()
 
     if success:
-        return _result(True, "已发送前往『办公室』的导航指令", {"x": x, "y": y, "z": z})
+        return _result(True, "已发送前往『办公室』的导航指令", {"x": x, "y": y, "z": z, "orientation": orientation})
     else:
         return _result(False, "MQTT消息发送失败")
 
@@ -289,6 +358,7 @@ def go_to_restroom() -> dict:
     locations = _load_locations_config()
     pos = locations.get("restroom", {})
     x, y, z = pos.get("x", 86.846), pos.get("y", 92.542), pos.get("z", 0.0)
+    orientation = pos.get("orientation", None)
     client = connect_mqtt()
     if client is None:
         return _result(False, "MQTT连接失败")
@@ -298,13 +368,13 @@ def go_to_restroom() -> dict:
         client.loop_stop()
         return _result(False, "MQTT连接失败")
 
-    success = _send_navigation(client, MQTT_TOPIC_GORESTROOM, x, y, z)
+    success = _send_navigation(client, MQTT_TOPIC_NAVIGATION, x, y, z, orientation)
     time.sleep(0.3)
     client.loop_stop()
     client.disconnect()
 
     if success:
-        return _result(True, "已发送前往『休息室』的导航指令", {"x": x, "y": y, "z": z})
+        return _result(True, "已发送前往『休息室』的导航指令", {"x": x, "y": y, "z": z, "orientation": orientation})
     else:
         return _result(False, "MQTT消息发送失败")
 
@@ -318,6 +388,7 @@ def go_to_corridor() -> dict:
     locations = _load_locations_config()
     pos = locations.get("corridor", {})
     x, y, z = pos.get("x", 97.678375), pos.get("y", 90.0347824), pos.get("z", 0.0)
+    orientation = pos.get("orientation", None)
     client = connect_mqtt()
     if client is None:
         return _result(False, "MQTT连接失败")
@@ -327,15 +398,189 @@ def go_to_corridor() -> dict:
         client.loop_stop()
         return _result(False, "MQTT连接失败")
 
-    success = _send_navigation(client, MQTT_TOPIC_GOCORRIDOR, x, y, z)
+    success = _send_navigation(client, MQTT_TOPIC_NAVIGATION, x, y, z, orientation)
     time.sleep(0.3)
     client.loop_stop()
     client.disconnect()
 
     if success:
-        return _result(True, "已发送前往『走廊』的导航指令", {"x": x, "y": y, "z": z})
+        return _result(True, "已发送前往『走廊』的导航指令", {"x": x, "y": y, "z": z, "orientation": orientation})
     else:
         return _result(False, "MQTT消息发送失败")
+
+def get_water_bottle() -> dict:
+    """
+    完整的拿水瓶动作：导航到办公室 → 机械臂移动到水瓶位置 → 夹爪夹取 → 机械臂抬升
+    适用场景：用户说"请帮我去拿水瓶"、"去拿瓶水"等需要完整拿水瓶流程时使用。
+    返回:
+        {"ok": bool, "text": str, "meta": dict}
+    """
+    logger.info("开始执行拿水瓶任务...")
+    
+    # ========== 可配置的控制指令变量 ==========
+    # 导航目标位置
+    NAV_X = 96.08911351986437
+    NAV_Y = 97.9304175732053
+    NAV_Z = 0.0
+    NAV_ORIENTATION = {"x": 0.0, "y": 0.0, "z": 0.04648695069293233, "w": -0.9989188973161299}  # 可选的四元数字典 {"x": 0, "y": 0, "z": 0, "w": 1}
+    
+    # 机械臂抓取位置
+    GRASP_X = -82.524
+    GRASP_Y = -36.584
+    GRASP_Z = -85.549
+    GRASP_RX = 93.457
+    GRASP_RY = 88.242
+    GRASP_RZ = 4.331
+    
+    # 机械臂抬升位置
+    LIFT_X = -183.396
+    LIFT_Y = 32.867
+    LIFT_Z = -100.611
+    LIFT_RX = -7.378
+    LIFT_RY = 89.048
+    LIFT_RZ = 0
+    
+    # 夹爪控制指令
+    GRIPPER_GRASP_CMD = 1  # 1=夹紧
+    GRIPPER_RELEASE_CMD = 2  # 2=松开
+    
+    # 等待时间配置
+    SEND_WAIT_TIME = 1.0  # 导航等待时间
+    
+    # ========== 执行步骤（单连接复用） ==========
+    client = connect_mqtt()
+    if client is None:
+        return _result(False, "MQTT连接失败", {"step": "init"})
+
+    try:
+        client.loop_start()
+        time.sleep(0.3)
+        if not client.is_connected():
+            return _result(False, "MQTT连接失败", {"step": "init"})
+        # 步骤0: 松开夹爪
+        logger.info("步骤0: 松开夹爪")
+        gripper_success = _send_gripper_command(
+            client, MQTT_TOPIC_GRIPPER_CONTROL, GRIPPER_RELEASE_CMD
+        )
+        if not gripper_success:
+            return _result(False, "松开夹爪指令发送失败", {"step": "gripper_release"})
+        logger.info(f"已发送松开夹爪指令: {GRIPPER_RELEASE_CMD}")
+        time.sleep(SEND_WAIT_TIME)
+        # # 步骤1: 导航到指定地点
+        # logger.info("步骤1: 导航到指定地点")
+        # nav_success = _send_navigation(
+        #     client,
+        #     MQTT_TOPIC_NAVIGATION,
+        #     NAV_X,
+        #     NAV_Y,
+        #     NAV_Z,
+        #     NAV_ORIENTATION,
+        # )
+        # if not nav_success:
+        #     return _result(False, "导航指令发送失败", {"step": "navigation"})
+        # logger.info(
+        #     f"已发送导航指令: ({NAV_X}, {NAV_Y}, {NAV_Z}), 朝向: {NAV_ORIENTATION}"
+        # )
+        # time.sleep(SEND_WAIT_TIME)
+
+        # 步骤2: 机械臂移动到水瓶抓取位置
+        logger.info("步骤2: 机械臂移动到水瓶抓取位置")
+        arm_success = _send_arm_coordinate_command(
+            client,
+            MQTT_TOPIC_ARM_COORDINATE,
+            GRASP_X,
+            GRASP_Y,
+            GRASP_Z,
+            GRASP_RX,
+            GRASP_RY,
+            GRASP_RZ,
+        )
+        if not arm_success:
+            return _result(False, "机械臂定位指令发送失败", {"step": "arm_positioning"})
+        logger.info(
+            f"已发送机械臂抓取位置指令: ({GRASP_X}, {GRASP_Y}, {GRASP_Z}), 姿态({GRASP_RX}, {GRASP_RY}, {GRASP_RZ})"
+        )
+        time.sleep(SEND_WAIT_TIME)
+
+        # 步骤3: 夹爪夹取水瓶
+        logger.info("步骤3: 夹爪夹取水瓶")
+        gripper_success = _send_gripper_command(
+            client, MQTT_TOPIC_GRIPPER_CONTROL, GRIPPER_GRASP_CMD
+        )
+        if not gripper_success:
+            return _result(False, "夹爪夹取指令发送失败", {"step": "gripper_grasp"})
+        logger.info(f"已发送夹爪夹取指令: {GRIPPER_GRASP_CMD}")
+        time.sleep(SEND_WAIT_TIME)
+
+        # 步骤4: 机械臂回到搬运姿态
+        logger.info("步骤4: 机械臂回到搬运姿态")
+        lift_success = _send_arm_coordinate_command(
+            client,
+            MQTT_TOPIC_ARM_COORDINATE,
+            LIFT_X,
+            LIFT_Y,
+            LIFT_Z,
+            LIFT_RX,
+            LIFT_RY,
+            LIFT_RZ,
+        )
+        if not lift_success:
+            return _result(False, "机械臂抬升指令发送失败", {"step": "arm_lift"})
+        logger.info(
+            f"已发送机械臂抬升指令: ({LIFT_X}, {LIFT_Y}, {LIFT_Z}), 姿态({LIFT_RX}, {LIFT_RY}, {LIFT_RZ})"
+        )
+
+        logger.info("拿水瓶任务完成")
+        return _result(
+            True,
+            "已成功完成拿水瓶任务：机械臂定位 → 夹爪夹取 → 机械臂抬升",
+            # "已成功完成拿水瓶任务：导航到办公室 → 机械臂定位 → 夹爪夹取 → 机械臂抬升",
+            {
+                "steps": [
+                    "navigation",
+                    "arm_positioning",
+                    "gripper_grasp",
+                    "arm_lift",
+                ],
+                "config": {
+                    "nav": {
+                        "x": NAV_X,
+                        "y": NAV_Y,
+                        "z": NAV_Z,
+                        "orientation": NAV_ORIENTATION,
+                    },
+                    "grasp": {
+                        "x": GRASP_X,
+                        "y": GRASP_Y,
+                        "z": GRASP_Z,
+                        "rx": GRASP_RX,
+                        "ry": GRASP_RY,
+                        "rz": GRASP_RZ,
+                    },
+                    "lift": {
+                        "x": LIFT_X,
+                        "y": LIFT_Y,
+                        "z": LIFT_Z,
+                        "rx": LIFT_RX,
+                        "ry": LIFT_RY,
+                        "rz": LIFT_RZ,
+                    },
+                    "gripper": {
+                        "grasp_cmd": GRIPPER_GRASP_CMD,
+                        "release_cmd": GRIPPER_RELEASE_CMD,
+                    },
+                },
+            },
+        )
+    finally:
+        try:
+            client.loop_stop()
+        except Exception:
+            pass
+        try:
+            client.disconnect()
+        except Exception:
+            pass
 
 def complex_task(location: str, arm_command: int) -> dict:
     """
@@ -446,6 +691,28 @@ GripperControlTool = StructuredTool.from_function(
     ),
 )
 
+# ArmControlCoordinateTool = StructuredTool.from_function(
+#     arm_control_coordinate,
+#     name="arm_control_coordinate",
+#     description=(
+#         "精确控制机械臂到指定坐标位置和姿态。"
+#         "使用时机: 需要精确控制机械臂位置和姿态时使用，如定点抓取、精确放置等。"
+#         "参数: x,y,z 位置坐标(mm), rx,ry,rz 姿态角度(度)。"
+#         "返回字段: ok, text, meta。"
+#     ),
+# )
+
+GetWaterBottleTool = StructuredTool.from_function(
+    get_water_bottle,
+    name="get_water_bottle",
+    description=(
+        "完整的拿水瓶动作：导航到办公室 → 机械臂移动到水瓶位置 → 夹爪夹取 → 机械臂抬升。"
+        "使用时机: 用户说'请帮我去拿水瓶'、'去拿瓶水'等需要完整拿水瓶流程时使用。"
+        "这是一个复合工具，会自动执行完整的拿水瓶流程。"
+        "返回字段: ok, text, meta。"
+    ),
+)
+
 # ========== 工具列表 ==========
 ALL_TOOLS = [
     ArmControlTool,
@@ -453,7 +720,9 @@ ALL_TOOLS = [
     GoToRestroomTool,
     GoToCorridorTool,
     ComplexTaskTool,
-    GripperControlTool
+    GripperControlTool,
+    # ArmControlCoordinateTool,
+    GetWaterBottleTool
 ]
 
 def get_all_tools():

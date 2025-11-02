@@ -123,39 +123,55 @@ def create_agent(llm_endpoint="http://localhost:8000/v1") -> Any:
         tools,
         llm,
         agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-        prompt="""你是搭载在迎宾服务机器人上的AI智能体，你的名字叫Siri。请用中文回答用户的需求。你可以通过调用相应的工具函数来控制机器人的导航和机械臂/夹爪操作。
+        prompt="""你是搭载在迎宾服务机器人上的AI智能体，你的名字叫Siri。任何情况都请用中文回答用户的需求。你可以通过调用相应的工具函数来控制机器人的导航和机械臂/夹爪操作。
 
-可用工具:
-- arm_control: 控制机械臂执行动作
-  - 参数: command (0=归位, 1=夹取, 2=释放, 3=搬运)
-  - 适用场景: "拿起水"、"放下杯子"、"机械臂归位"等
-- gripper_control: 控制夹爪开合
-  - 参数: command (1=夹紧, 2=松开)
-  - 适用场景: "夹爪夹紧"、"夹爪松开" 等
-- go_to_office: 导航到办公室
-  - 适用场景: "去办公室"、"到办公室去"等
-- go_to_restroom: 导航到休息室
-  - 适用场景: "去休息室"、"到休息室"等
-- go_to_corridor: 导航到走廊
-  - 适用场景: "去走廊"、"到走廊中间"等
-- complex_task: 执行组合任务（先导航再操作机械臂）
-  - 参数: location ("office"/"restroom"/"corridor"), arm_command (0-3)
-  - 适用场景: "去办公室拿瓶水"、"把水送到休息室"等
+【核心原则 - 必须严格遵守】
+1. **明确识别原则**：只根据用户明确表达的意图调用工具，不要推测或过度解读
+2. **关键词匹配原则**：必须确认用户话中包含特定关键词才调用相应工具
+3. **单一任务原则**：用户明确只要求一个动作时，只调用一个工具，不要自动添加额外步骤
 
-顺序策略（非常重要）：
-1) 如果需求涉及“去某地并做某事”，请先调用导航工具，再调用机械臂，然后根据需要调用夹爪。
-2) 仅当必须要连续执行多个工具时，按以下顺序依次调用：导航 → 机械臂 → 夹爪。
-3) 如果用户只提出单一动作（如只夹紧夹爪），则直接调用该工具，不要添加无关步骤。
-4) 工具之间不要并行调用，等待上一步完成再进行下一步。
+【工具列表及调用条件】
 
-使用示例:
-- "去办公室" → 使用 go_to_office()
-- "拿起水" → 使用 arm_control(1)
-- "去办公室拿瓶水" → 使用 complex_task("office", 1)
-- "把水送到休息室" → 使用 complex_task("restroom", 3)
-- "去走廊然后放下东西" → 使用 complex_task("corridor", 2)
+导航工具 - 调用条件：用户明确表达了"去"、"到"、"导航"、"前往"等移动意图
+- go_to_office: 去办公室（关键词：办公室、office）
+- go_to_restroom: 去休息室（关键词：休息室、restroom）  
+- go_to_corridor: 去走廊（关键词：走廊、corridor）
+- 示例："去办公室"、"到休息室去"、"导航到走廊"
 
-根据用户的具体需求选择合适的工具。若用户要求“去某地做某事”，请显式先导航再执行机械臂/夹爪；若已有更细分的步骤，则按导航→机械臂→夹爪的顺序分步调用工具。""",
+机械臂工具(arm_control) - 调用条件：用户明确表达了"拿起"、"放下"、"起"、"下"、"机械臂"、"搬"等操作意图
+- 参数: command (0=归位, 1=夹取, 2=释放, 3=搬运)
+- 示例："拿起水"、"放下杯子"、"机械臂归位"、"把它搬起来"
+
+夹爪工具(gripper_control) - 调用条件：用户明确表达了"夹爪"、"夹"、"夹取"、"抓"、"握"等动作
+- 参数: command (1=夹紧, 2=松开)
+- 示例："夹爪夹紧"、"夹爪松开"、"夹取物体"
+
+复合任务工具 - 只在用户同时提出导航+机械臂需求时使用
+- complex_task: 先导航再执行机械臂动作
+- get_water_bottle: 拿水瓶的完整自动化流程（适合"拿水瓶"、"拿水杯"等明确需求）
+
+【禁用行为】
+❌ 用户说"你好"只回复问候，不要调用任何工具
+❌ 用户问"状态"时只回答状态信息，不要主动导航
+❌ 用户说"可以吗"、"准备好了吗"时只确认，不调用工具
+❌ 用户没有提到具体地点时，不要使用导航工具
+❌ 用户没有提到"拿"、"放"、"机械臂"时，不要调用机械臂
+❌ 用户没有提到"夹"、"爪"时，不要调用夹爪
+
+【正确使用示例】
+- "你好" → 只回复问候，不调用工具
+- "去办公室" → go_to_office()（明确的导航意图）
+- "拿起水" → arm_control(1)（明确的机械臂操作）
+- "夹爪夹紧" → gripper_control(1)（明确的夹爪操作）
+- "请帮我去拿水瓶" → get_water_bottle()（明确的完整任务）
+- "去办公室拿瓶水" → complex_task("office", 1)（同时包含导航和拿取）
+
+【错误使用示例】
+- 用户："你好" → ❌ 不要执行"去办公室"
+- 用户："准备好了吗" → ❌ 不要调用任何工具
+- 用户："水在哪里" → ❌ 不调用导航或机械臂，只回答问题
+
+严格遵循上述原则，确保只在用户明确表达意图时才调用相应工具。""",
         verbose=False,
         handle_parsing_errors=True,
         return_intermediate_steps=True  # 启用返回中间步骤
@@ -171,6 +187,24 @@ def initialize_agent_globally():
         logger.info("正在初始化AI Agent...")
         agent = create_agent(llm_endpoint)
         logger.info("AI Agent初始化完成")
+
+def _post_process_response(original_prompt, agent_output, tool_outputs):
+    """直接组合LLM输出和工具结果的text部分"""
+    # 提取工具结果的text字段
+    tool_texts = []
+    for tool_output in tool_outputs:
+        if isinstance(tool_output, dict) and 'text' in tool_output:
+            text = tool_output['text']
+            if text and isinstance(text, str):
+                tool_texts.append(text)
+    
+    # 组合LLM输出和工具结果
+    if tool_texts:
+        final_text = f"{agent_output}\n\n" + "\n".join(tool_texts)
+    else:
+        final_text = agent_output
+    
+    return final_text
 
 # --- HTTP API 路由 ---
 
@@ -220,25 +254,9 @@ def completions():
             # 从回调处理器获取工具执行结果
             tool_outputs = callback_handler.get_tool_outputs()
             
-            # 决定返回给客户端的内容
-            if tool_outputs:
-                # 如果有工具返回值，只取每个工具结果的第一段话（第一个\n之前）
-                first_lines = []
-                for tool_output in tool_outputs:
-                    try:
-                        text = tool_output if isinstance(tool_output, str) else json.dumps(tool_output, ensure_ascii=False)
-                    except Exception:
-                        text = str(tool_output)
-                    first_line = text.split('\n')[0] if '\n' in text else text
-                    first_lines.append(first_line)
-                
-                tool_results_text = "\n".join(first_lines)
-                final_text = f"{tool_results_text}\n\n{output_text}"
-                logger.info(f"返回 {len(tool_outputs)} 个工具执行结果+LLM输出给客户端")
-            else:
-                # 如果工具没有返回值，直接返回LLM的输出
-                final_text = output_text
-                logger.info("返回LLM输出结果给客户端")
+            # 统一进行后处理，无论是否有工具调用
+            final_text = _post_process_response(prompt, output_text, tool_outputs)
+            logger.info("返回后处理结果给客户端")
             
             # 构建响应格式，兼容OpenAI API
             result = {
@@ -320,21 +338,9 @@ def chat_completions():
             # 从回调处理器获取工具执行结果
             tool_outputs = callback_handler.get_tool_outputs()
             
-            # 决定返回给客户端的内容
-            if tool_outputs:
-                # 如果有工具返回值，只取每个工具结果的第一段话（第一个\n之前）
-                first_lines = []
-                for tool_output in tool_outputs:
-                    first_line = tool_output.split('\n')[0] if '\n' in tool_output else tool_output
-                    first_lines.append(first_line)
-                
-                tool_results_text = "\n".join(first_lines)
-                final_text = f"{tool_results_text}\n\n{output_text}"
-                logger.info(f"返回 {len(tool_outputs)} 个工具执行结果+LLM输出给客户端")
-            else:
-                # 如果工具没有返回值，直接返回LLM的输出
-                final_text = output_text
-                logger.info("返回LLM输出结果给客户端")
+            # 统一进行后处理，无论是否有工具调用
+            final_text = _post_process_response(prompt, output_text, tool_outputs)
+            logger.info("返回后处理结果给客户端")
             
             result = {
                 "choices": [
