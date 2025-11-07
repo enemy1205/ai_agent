@@ -25,14 +25,19 @@ def build_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
 
 
-def post_chat_completions(url: str, user_text: str, timeout: float = 30.0) -> Dict[str, Any]:
+def post_chat_completions(url: str, user_text: str, session_id: str = None, timeout: float = 30.0) -> Dict[str, Any]:
     """
     适配 http_agent_server.py 的 /v1/chat/completions：
-    请求: {"messages": [{"role": "user", "content": "..."}]}
-    返回: choices[0].message.content
+    请求: {"messages": [{"role": "user", "content": "..."}], "session_id": "..."}
+    返回: choices[0].message.content + metadata.session_id
     """
     headers = {"Content-Type": "application/json"}
     payload = {"messages": [{"role": "user", "content": user_text}]}
+    
+    # 如果有 session_id，添加到请求中以维持会话
+    if session_id:
+        payload["session_id"] = session_id
+    
     resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
     # 尝试返回 JSON；非 2xx 也读取文本便于调试
     try:
@@ -85,7 +90,13 @@ def extract_texts_from_response(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def interactive_loop(url: str, show_raw: bool, timeout: float):
     print(f"目标接口: {url}")
-    print("输入中文指令回车发送。输入 'exit' 或 Ctrl+C 退出。\n")
+    print("输入中文指令回车发送。输入 'exit' 或 Ctrl+C 退出。")
+    print("🧠 启用会话记忆功能，对话将被记住。\n")
+    
+    # 维护会话ID以保持记忆
+    session_id = None
+    request_count = 0
+    
     while True:
         try:
             user_text = input("你: ").strip()
@@ -101,16 +112,29 @@ def interactive_loop(url: str, show_raw: bool, timeout: float):
 
         t0 = time.time()
         try:
-            data = post_chat_completions(url, user_text, timeout=timeout)
+            data = post_chat_completions(url, user_text, session_id=session_id, timeout=timeout)
         except requests.exceptions.RequestException as e:
             print(f"[请求错误] {e}")
             continue
         dt = (time.time() - t0) * 1000
+        request_count += 1
 
         status = data.get("http_status")
         if status and status >= 400:
             print(f"[HTTP {status}] {data}")
             continue
+
+        # 提取并保存 session_id
+        metadata = data.get("metadata", {})
+        if metadata.get("session_id"):
+            new_session_id = metadata["session_id"]
+            if session_id is None:
+                session_id = new_session_id
+                print(f"🔑 会话已创建: {session_id[:8]}...\n")
+            elif session_id != new_session_id:
+                # 理论上不应该发生，除非服务器重启
+                session_id = new_session_id
+                print(f"⚠️  会话ID已更新: {session_id[:8]}...\n")
 
         if show_raw:
             print("\n=== 原始响应 JSON ===")
@@ -120,7 +144,12 @@ def interactive_loop(url: str, show_raw: bool, timeout: float):
         tool_feedback = split_texts.get("tool_feedback")
         assistant_text = split_texts.get("assistant_text")
 
-        print(f"\n(耗时: {dt:.0f} ms)")
+        # 显示会话信息
+        memory_count = metadata.get("memory_messages_count", 0)
+        tool_calls_count = metadata.get("tool_calls_count", 0)
+        
+        print(f"\n(耗时: {dt:.0f} ms | 第{request_count}次请求 | 记忆:{memory_count}条消息 | 工具调用:{tool_calls_count}次)")
+        
         if tool_feedback:
             print("—— 工具反馈 ——")
             print(tool_feedback)
