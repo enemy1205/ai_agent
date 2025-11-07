@@ -5,7 +5,7 @@ import rospy
 from geometry_msgs.msg import PoseStamped, Quaternion
 from navigation_msgs.msg import NavigationStatus
 import math
-from imrobot_msg.msg import ArmDrive, ArmStatus
+from imrobot_msg.msg import ArmDrive, ArmStatus,ArmPositionDrive
 from std_msgs.msg import Int32, Bool
 import paho.mqtt.client as mqtt
 import logging
@@ -66,7 +66,7 @@ class NavigationManager:
     def init_ros(self):
         # 初始化发布者
         self.pub_nav_goal = rospy.Publisher("/move_base_simple/goal", PoseStamped, queue_size=10)
-        self.pub_arm_drive = rospy.Publisher("/arm_drive", ArmDrive, queue_size=10)
+        self.pub_arm_drive = rospy.Publisher("/Arm_Position_Drive", ArmPositionDrive, queue_size=10)
         self.pub_cmd_end_effector = rospy.Publisher("/cmdeffector", Int32, queue_size=10)
         # 订阅状态（用于日志记录）
         rospy.Subscriber("/navigation_status", NavigationStatus, self.update_nav_status, queue_size=10)
@@ -129,7 +129,7 @@ class NavigationManager:
         rospy.loginfo(f"发布机械臂命令: {command}")
         
         # 根据命令类型设置机械臂参数
-        arm_cmd = ArmDrive()
+        arm_cmd = ArmPositionDrive()
         if command == 0:
             # 回到原位
             arm_cmd.x = -183.396
@@ -179,7 +179,7 @@ class NavigationManager:
         rospy.loginfo(f"发布机械臂坐标指令: 位置({x}, {y}, {z}), 姿态({rx}, {ry}, {rz})")
         
         # 创建机械臂控制指令
-        arm_cmd = ArmDrive()
+        arm_cmd = ArmPositionDrive()
         arm_cmd.x = x
         arm_cmd.y = y
         arm_cmd.z = z
