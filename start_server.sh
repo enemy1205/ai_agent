@@ -12,6 +12,7 @@ LLM_ENDPOINT=""
 VOICE_HOST="0.0.0.0"
 VOICE_PORT="4999"
 DEBUG=""
+LOG_LEVEL="INFO"  # 默认日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -52,6 +53,10 @@ while [[ $# -gt 0 ]]; do
             DEBUG="--debug"
             shift
             ;;
+        --log-level)
+            LOG_LEVEL="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "HTTP Agent Server 启动脚本"
             echo ""
@@ -66,6 +71,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --llm-endpoint URL    LLM服务端点"
             echo "  --asr-host HOST       ASR监听主机（默认: 0.0.0.0）"
             echo "  --asr-port PORT       ASR监听端口（默认: 4999）"
+            echo "  --log-level LEVEL     日志级别（默认: INFO, 可选: DEBUG, INFO, WARNING, ERROR, CRITICAL）"
             echo "  --debug               启用调试模式"
             echo "  -h, --help            显示此帮助信息"
             echo ""
@@ -86,6 +92,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "🚀 启动一键服务启动器..."
+echo "📝 日志级别: $LOG_LEVEL"
 
 # 推导 LLM 端点
 if [ -z "$LLM_ENDPOINT" ]; then
@@ -95,6 +102,9 @@ fi
 # 准备日志目录
 LOG_DIR="$(pwd)/logs"
 mkdir -p "$LOG_DIR"
+
+# 导出日志级别环境变量（供所有Python服务使用）
+export LOG_LEVEL="$LOG_LEVEL"
 
 # 等待HTTP服务可用
 wait_for_http() {
@@ -152,13 +162,13 @@ echo "🧠 LLM:   $LLM_ENDPOINT"
 
 # 后台启动HTTP Agent Server
 echo "🌟 启动HTTP Agent Server 到后台... (日志: $LOG_DIR/agent.log)"
-nohup bash -c "$CMD" > "$LOG_DIR/agent.log" 2>&1 &
+LOG_LEVEL="$LOG_LEVEL" nohup bash -c "$CMD" > "$LOG_DIR/agent.log" 2>&1 &
 AGENT_PID=$!
 
 # 启动语音VOICE服务
 if [ -f "voice_services.py" ]; then
 	echo "🎤 启动统一语音服务到后台 ($VOICE_HOST:$VOICE_PORT)... (日志: $LOG_DIR/voice.log)"
-	FLASK_HOST="$VOICE_HOST" FLASK_PORT="$VOICE_PORT" nohup python3 voice_services.py > "$LOG_DIR/voice.log" 2>&1 &
+	LOG_LEVEL="$LOG_LEVEL" FLASK_HOST="$VOICE_HOST" FLASK_PORT="$VOICE_PORT" nohup python3 voice_services.py > "$LOG_DIR/voice.log" 2>&1 &
 	VOICE_PID=$!
 else
 	echo "ℹ️ 未发现 voice_services.py，跳过启动语音服务"
@@ -167,11 +177,13 @@ fi
 echo ""
 echo "📋 服务状态:"
 echo "  🧠 LLM:   $LLM_ENDPOINT  (日志: $LOG_DIR/llm.log)"
-echo "  🌐 Agent: http://$HOST:$PORT (日志: $LOG_DIR/agent.log)"
+echo "  🌐 Agent: http://$HOST:$PORT (日志: $LOG_DIR/agent.log, 日志级别: $LOG_LEVEL)"
 if [ -n "$VOICE_PID" ]; then
-	echo "  🎤 VOICE:        运行中 (日志: $LOG_DIR/voice.log)"
+	echo "  🎤 VOICE:        运行中 (日志: $LOG_DIR/voice.log, 日志级别: $LOG_LEVEL)"
 else
 	echo "  🎤 VOICE:        未启动"
 fi
 echo ""
 echo "✅ 所有服务已尝试启动到后台。按 Ctrl+C 退出此提示，不影响后台服务运行。"
+echo ""
+echo "💡 提示: 可以通过 --log-level 参数调整日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)"

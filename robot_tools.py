@@ -6,22 +6,20 @@
 import sys
 import json
 from pathlib import Path
-import logging
 import paho.mqtt.client as mqtt
 import time
+import os
 from typing import Any, Dict
 from langchain.tools import StructuredTool
 
-# 日志配置
-logger = logging.getLogger('RobotController')
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-# 避免向根日志传播导致重复输出
-logger.propagate = False
+# === 导入统一日志配置 ===
+from logger_config import (
+    create_server_logger,
+    log_mqtt_publish
+)
+
+# 创建logger实例（服务器端）
+logger = create_server_logger("robot_tools", level=os.getenv("LOG_LEVEL", "INFO"))
 
 if sys.platform == 'win32':
     sys.stderr.reconfigure(encoding='utf-8')
@@ -82,93 +80,93 @@ def _send_navigation(client, topic, x, y, z, orientation=None):
         payload["orientation"] = orientation
     
     payload_str = json.dumps(payload)
-    logger.debug(f"发送导航指令: {topic} → {payload_str}")
+    log_mqtt_publish(logger, topic, payload_str[:100])
     try:
         result = client.publish(topic, payload_str, qos=1)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             # 使用更短的超时时间
             result.wait_for_publish(timeout=2)
-            logger.debug("发布成功")
+            logger.debug("MQTT发布成功")
             return True
         else:
-            logger.error(f"发布失败，错误码: {result.rc}")
+            logger.error(f"MQTT发布失败，错误码: {result.rc}")
             return False
     except TimeoutError:
-        logger.warning("发布超时")
+        logger.warning("MQTT发布超时")
         return False
     except RuntimeError as e:
-        logger.error(f"发布失败: {e}")
+        logger.error(f"MQTT发布失败: {e}")
         return False
     except Exception as e:
-        logger.error(f"未知错误: {e}")
+        logger.error(f"MQTT发布未知错误: {e}", exc_info=True)
         return False
 
 def _send_arm_command(client, topic, command):
     payload = json.dumps({"command": command})
-    logger.debug(f"发送机械臂指令: {command} → {payload}")
+    log_mqtt_publish(logger, topic, payload)
     try:
         result = client.publish(topic, payload, qos=1)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             # 使用更短的超时时间
             result.wait_for_publish(timeout=2)
-            logger.debug("发布成功")
+            logger.debug("MQTT发布成功")
             return True
         else:
-            logger.error(f"发布失败，错误码: {result.rc}")
+            logger.error(f"MQTT发布失败，错误码: {result.rc}")
             return False
     except TimeoutError:
-        logger.warning("发布超时")
+        logger.warning("MQTT发布超时")
         return False
     except RuntimeError as e:
-        logger.error(f"发布失败: {e}")
+        logger.error(f"MQTT发布失败: {e}")
         return False
     except Exception as e:
-        logger.error(f"未知错误: {e}")
+        logger.error(f"MQTT发布未知错误: {e}", exc_info=True)
         return False
 
 def _send_arm_coordinate_command(client, topic, x, y, z, rx, ry, rz):
     payload = json.dumps({"x": x, "y": y, "z": z, "rx": rx, "ry": ry, "rz": rz})
-    logger.debug(f"发送机械臂坐标指令: {topic} → {payload}")
+    log_mqtt_publish(logger, topic, payload)
     try:
         result = client.publish(topic, payload, qos=1)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             result.wait_for_publish(timeout=2)
-            logger.debug("发布成功")
+            logger.debug("MQTT发布成功")
             return True
         else:
-            logger.error(f"发布失败，错误码: {result.rc}")
+            logger.error(f"MQTT发布失败，错误码: {result.rc}")
             return False
     except TimeoutError:
-        logger.warning("发布超时")
+        logger.warning("MQTT发布超时")
         return False
     except RuntimeError as e:
-        logger.error(f"发布失败: {e}")
+        logger.error(f"MQTT发布失败: {e}")
         return False
     except Exception as e:
-        logger.error(f"未知错误: {e}")
+        logger.error(f"MQTT发布未知错误: {e}", exc_info=True)
         return False
 
 def _send_gripper_command(client, topic, command):
     payload = json.dumps({"command": command})
-    logger.debug(f"发送夹爪指令: {command} → {payload}")
+    log_mqtt_publish(logger, topic, payload)
     try:
         result = client.publish(topic, payload, qos=1)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             # 使用更短的超时时间
             result.wait_for_publish(timeout=2)
-            logger.debug("发布成功")
+            logger.debug("MQTT发布成功")
             return True
         else:
-            logger.error(f"发布失败，错误码: {result.rc}")
+            logger.error(f"MQTT发布失败，错误码: {result.rc}")
             return False
     except TimeoutError:
-        logger.warning("发布超时")
+        logger.warning("MQTT发布超时")
         return False
     except RuntimeError as e:
-        logger.error(f"发布失败: {e}")
+        logger.error(f"MQTT发布失败: {e}")
         return False
     except Exception as e:
-        logger.error(f"未知错误: {e}")
+        logger.error(f"MQTT发布未知错误: {e}", exc_info=True)
         return False
 
 
@@ -753,8 +751,9 @@ def get_tools_info():
 
 if __name__ == "__main__":
     # 显示工具信息
-    print("\n🤖 机器人控制工具:")
+    logger.info("=" * 60)
+    logger.info("机器人控制工具模块")
     for tool_info in get_tools_info():
-        print(f"  - {tool_info['name']}: {tool_info['description'][:80]}...")
-    
-    print("\n🤖 机器人工具模块测试完成！")
+        logger.info(f"  - {tool_info['name']}: {tool_info['description'][:80]}...")
+    logger.info("=" * 60)
+    logger.info("机器人工具模块测试完成")

@@ -12,10 +12,23 @@ import sys
 import base64
 import json
 import time
-import logging
+import uuid
 from typing import Optional
 from speaker_local import LocalSpeaker
 from flask import Flask, request, jsonify
+
+# === 导入统一日志配置 ===
+from logger_config import (
+    create_server_logger,
+    set_request_id,
+    log_request_start,
+    log_request_end,
+    log_asr_result,
+    log_tts_request
+)
+
+# 创建logger实例（服务器端）
+logger = create_server_logger("voice_services", level=os.getenv("LOG_LEVEL", "INFO"))
 
 # --- 腾讯云 SDK 导入 ---
 # ASR
@@ -36,18 +49,6 @@ from tencentcloud.tts.v20190823 import tts_client, models as tts_models
 # 从环境变量获取腾讯云密钥
 SECRET_ID = os.getenv("TENCENTCLOUD_SECRET_ID")
 SECRET_KEY = os.getenv("TENCENTCLOUD_SECRET_KEY")
-
-# 配置日志系统
-logging.basicConfig(
-    level=logging.INFO,
-    # level=logging.INFO,
-    # format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    # handlers=[
-    #     logging.StreamHandler(sys.stdout),
-    #     logging.FileHandler('voice_service.log', encoding='utf-8')
-    # ]
-)
-logger = logging.getLogger(__name__)
 
 # ASR 配置
 ASR_ENGINE_MODEL_TYPE = "16k_zh" # 适用于中文普通话
@@ -76,7 +77,7 @@ _local_speaker_instance: Optional[LocalSpeaker] = None
 def get_local_speaker() -> LocalSpeaker:
     global _local_speaker_instance
     if _local_speaker_instance is None:
-        logger.info("🔧 初始化 LocalSpeaker 模型与数据库...")
+        logger.info("初始化 LocalSpeaker 模型与数据库...")
         spk = LocalSpeaker(model_name_or_dir=SPEAKER_MODEL_DIR, db_dir=SPEAKER_DB_DIR)
         # 统一设置设备（优先环境变量），speaker_local 默认 cuda:0，可能在无 GPU 环境报错
         if SPEAKER_DEVICE:
@@ -85,6 +86,7 @@ def get_local_speaker() -> LocalSpeaker:
             except Exception as e:
                 logger.warning(f"设置设备为 {SPEAKER_DEVICE} 失败，回退默认设备: {e}")
         _local_speaker_instance = spk
+        logger.info("LocalSpeaker 初始化完成")
     return _local_speaker_instance
 
 # --- ASR 核心逻辑 ---
@@ -114,20 +116,21 @@ def recognize_audio_with_tencent(audio_data: bytes) -> dict:
         }
         req.from_json_string(json.dumps(params))
 
-        logger.info("🔄 正在调用 ASR...")
+        logger.debug("正在调用腾讯云ASR...")
         resp = client.SentenceRecognition(req)
-        logger.info("✅ ASR 识别完成.")
+        result_text = getattr(resp, 'Result', "")
+        log_asr_result(logger, result_text or "(空)")
         return {
             "success": True,
-            "result": getattr(resp, 'Result', ""),
+            "result": result_text,
             "request_id": resp.RequestId,
             "duration": getattr(resp, 'AudioDuration', None)
         }
     except AsrException as err:
-        logger.error(f"❌ ASR SDK 错误: {err}")
+        logger.error(f"ASR SDK 错误: {err}")
         return {"success": False, "error": f"Tencent ASR SDK Error: {err}"}
     except Exception as e:
-        logger.error(f"❌ ASR 其他识别错误: {e}")
+        logger.error(f"ASR 其他识别错误: {e}", exc_info=True)
         return {"success": False, "error": f"ASR General Error: {e}"}
 
 # --- TTS 核心逻辑 ---
@@ -154,9 +157,10 @@ def synthesize_text_with_tencent(text: str, voice_type: int, primary_language: i
         req.Speed = speed
         req.Codec = codec
 
-        logger.info(f"-> 调用 TTS: '{text[:30]}{'...' if len(text) > 30 else ''}'")
+        log_tts_request(logger, text)
+        logger.debug("正在调用腾讯云TTS...")
         resp = client.TextToVoice(req)
-        logger.info("<- TTS 合成完成.")
+        logger.info("TTS 合成完成")
 
         if resp.Audio and resp.SessionId:
             return {
@@ -169,16 +173,16 @@ def synthesize_text_with_tencent(text: str, voice_type: int, primary_language: i
             }
         else:
             error_msg = "TTS API 返回响应中没有音频数据"
-            logger.error(f"! 错误: {error_msg}")
+            logger.error(f"错误: {error_msg}")
             return {"success": False, "error": error_msg}
 
     except TtsException as err:
         error_msg = f"Tencent Cloud TTS SDK Error: {err}"
-        logger.error(f"!TTS SDK 错误: {err}")
+        logger.error(f"TTS SDK 错误: {err}")
         return {"success": False, "error": error_msg}
     except Exception as e:
         error_msg = f"TTS General Server Error: {e}"
-        logger.error(f"!TTS 其他错误: {e}")
+        logger.error(f"TTS 其他错误: {e}", exc_info=True)
         return {"success": False, "error": error_msg}
 
 # --- Flask 路由 ---
@@ -199,39 +203,59 @@ def home():
 @app.route('/asr/recognize', methods=['POST'])
 def asr_recognize():
     """ASR 识别接口"""
+    # 为每个请求生成唯一的request_id
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/asr/recognize", "POST")
+    
     if not request.is_json:
+        logger.warning("请求不是JSON格式")
+        log_request_end(logger, 400)
         return jsonify({"error": "请求必须是 JSON 格式"}), 400
 
     data = request.get_json()
     audio_base64 = data.get('audio_base64')
 
     if not audio_base64:
+        logger.warning("缺少 audio_base64 字段")
+        log_request_end(logger, 400)
         return jsonify({"error": "缺少 'audio_base64' 字段"}), 400
 
     try:
-        logger.info("-> ASR 接收到 Base64 音频数据，正在解码...")
+        logger.debug("ASR 接收到 Base64 音频数据，正在解码...")
         # 腾讯云 SDK 内部期望的是 bytes，base64.b64decode 直接返回 bytes
         audio_data = base64.b64decode(audio_base64)
-        logger.info(f"-> ASR 解码完成，音频数据大小: {len(audio_data)} 字节")
+        logger.debug(f"ASR 解码完成，音频数据大小: {len(audio_data)} 字节")
 
         result = recognize_audio_with_tencent(audio_data)
+        log_request_end(logger, 200)
         # 错误已在函数内处理
         return jsonify(result)
 
     except Exception as e:
-        logger.error(f"! ASR 处理请求时出错: {e}")
+        logger.error(f"ASR 处理请求时出错: {e}", exc_info=True)
+        log_request_end(logger, 500)
         return jsonify({"success": False, "error": f"ASR Server Error: {e}"}), 500
 
 @app.route('/tts/synthesize', methods=['POST'])
 def tts_synthesize():
     """TTS 合成接口"""
+    # 为每个请求生成唯一的request_id
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/tts/synthesize", "POST")
+    
     if not request.is_json:
+        logger.warning("请求不是JSON格式")
+        log_request_end(logger, 400)
         return jsonify({"error": "请求必须是 JSON 格式"}), 400
 
     data = request.get_json()
     text = data.get('text', '').strip()
 
     if not text:
+        logger.warning("缺少 text 字段或文本为空")
+        log_request_end(logger, 400)
         return jsonify({"error": "请求中缺少 'text' 字段或文本为空"}), 400
 
     # 获取并验证参数，使用默认值
@@ -242,9 +266,12 @@ def tts_synthesize():
     codec = data.get('codec', TTS_DEFAULT_CODEC).lower()
 
     if codec not in ["wav", "mp3", "pcm"]:
+        logger.warning(f"不支持的codec格式: {codec}")
+        log_request_end(logger, 400)
         return jsonify({"error": "不支持的 'codec' 格式，支持: wav, mp3, pcm"}), 400
 
     result = synthesize_text_with_tencent(text, voice_type, primary_language, sample_rate, speed, codec)
+    log_request_end(logger, 200)
     # 错误已在函数内处理
     return jsonify(result)
 
@@ -252,21 +279,32 @@ def tts_synthesize():
 @app.route('/asr/recognize_file', methods=['POST'])
 def asr_recognize_file():
     """通过上传 WAV 文件进行 ASR 识别"""
+    # 为每个请求生成唯一的request_id
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/asr/recognize_file", "POST")
+    
     if 'file' not in request.files:
+        logger.warning("请求中缺少 file 字段")
+        log_request_end(logger, 400)
         return jsonify({"error": "请求中缺少 'file' 字段"}), 400
 
     file = request.files['file']
     if file.filename == '':
+        logger.warning("未选择文件")
+        log_request_end(logger, 400)
         return jsonify({"error": "未选择文件"}), 400
 
     try:
         file_content = file.read()
-        logger.info(f"-> ASR 文件上传识别，文件大小: {len(file_content)} 字节")
+        logger.info(f"ASR 文件上传识别，文件大小: {len(file_content)} 字节")
         result = recognize_audio_with_tencent(file_content)
+        log_request_end(logger, 200)
         return jsonify(result)
 
     except Exception as e:
-        logger.error(f"! ASR 文件处理时出错: {e}")
+        logger.error(f"ASR 文件处理时出错: {e}", exc_info=True)
+        log_request_end(logger, 500)
         return jsonify({"success": False, "error": f"ASR File Error: {e}"}), 500
 
 
@@ -274,7 +312,14 @@ def asr_recognize_file():
 @app.route('/speaker/register', methods=['POST'])
 def speaker_register():
     """语音身份注册：接收 { id, audio_base64 }，返回是否成功"""
+    # 为每个请求生成唯一的request_id
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/speaker/register", "POST")
+    
     if not request.is_json:
+        logger.warning("请求不是JSON格式")
+        log_request_end(logger, 400)
         return jsonify({"success": False, "error": "请求必须是 JSON"}), 400
 
     data = request.get_json()
@@ -282,23 +327,38 @@ def speaker_register():
     audio_base64 = data.get('audio_base64')
 
     if not register_id:
+        logger.warning("缺少 id 字段")
+        log_request_end(logger, 400)
         return jsonify({"success": False, "error": "缺少 'id'"}), 400
     if not audio_base64:
+        logger.warning("缺少 audio_base64 字段")
+        log_request_end(logger, 400)
         return jsonify({"success": False, "error": "缺少 'audio_base64'"}), 400
 
     try:
+        logger.info(f"注册声纹: {register_id}")
         spk = get_local_speaker()
         result = spk.register(register_id, audio_base64)
+        logger.info(f"声纹注册成功: {register_id}")
+        log_request_end(logger, 200)
         return jsonify({"success": True, "id": result.get("name"), "path": result.get("path")})
     except Exception as e:
-        logger.error(f"! 说话人注册失败: {e}")
+        logger.error(f"说话人注册失败: {e}", exc_info=True)
+        log_request_end(logger, 500)
         return jsonify({"success": False, "error": f"register failed: {e}"}), 500
 
 
 @app.route('/speaker/verify', methods=['POST'])
 def speaker_verify():
     """语音身份认证：接收 { audio_base64 }，返回匹配的 id 或 UNREGISTERED"""
+    # 为每个请求生成唯一的request_id
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/speaker/verify", "POST")
+    
     if not request.is_json:
+        logger.warning("请求不是JSON格式")
+        log_request_end(logger, 400)
         return jsonify({"success": False, "error": "请求必须是 JSON"}), 400
 
     data = request.get_json()
@@ -306,15 +366,25 @@ def speaker_verify():
     threshold = float(data.get('threshold', SPEAKER_THRESHOLD))
 
     if not audio_base64:
+        logger.warning("缺少 audio_base64 字段")
+        log_request_end(logger, 400)
         return jsonify({"success": False, "error": "缺少 'audio_base64'"}), 400
 
     try:
+        logger.debug("声纹认证中...")
         spk = get_local_speaker()
         res = spk.recognize(audio_base64)
         name = res.get('name')
         confidence = float(res.get('confidence') or 0.0)
         is_registered = bool(name) and confidence >= threshold
         final_id = name if is_registered else UNREGISTERED_ID
+        
+        if is_registered:
+            logger.info(f"声纹认证通过: {final_id} (置信度: {confidence:.2f})")
+        else:
+            logger.info(f"声纹未识别 (置信度: {confidence:.2f})")
+        
+        log_request_end(logger, 200)
         return jsonify({
             "success": True,
             "id": final_id,
@@ -323,7 +393,8 @@ def speaker_verify():
             "registered": is_registered
         })
     except Exception as e:
-        logger.error(f"! 说话人认证失败: {e}")
+        logger.error(f"说话人认证失败: {e}", exc_info=True)
+        log_request_end(logger, 500)
         return jsonify({"success": False, "error": f"verify failed: {e}"}), 500
 
 if __name__ == '__main__':
@@ -334,5 +405,14 @@ if __name__ == '__main__':
     host = os.environ.get('FLASK_HOST', '0.0.0.0')
     port = int(os.environ.get('FLASK_PORT', 4999))
     
-    logger.info(f"🚀 启动语音服务节点 (host={host}, port={port})...")
+    logger.info("=" * 60)
+    logger.info("启动语音服务节点")
+    logger.info(f"服务地址: http://{host}:{port}")
+    logger.info("可用端点:")
+    logger.info("  - POST /asr/recognize")
+    logger.info("  - POST /tts/synthesize")
+    logger.info("  - POST /speaker/register")
+    logger.info("  - POST /speaker/verify")
+    logger.info("=" * 60)
+    
     app.run(host=host, port=port, debug=False)

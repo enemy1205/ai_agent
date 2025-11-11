@@ -13,17 +13,25 @@ from flask_cors import CORS
 from langchain.agents import initialize_agent, AgentType
 from langchain_openai import OpenAI
 from langchain_core.callbacks import BaseCallbackHandler
-import logging
 import json
+import uuid
 
 # 导入机器人控制工具
 from robot_tools import (
     get_all_tools, get_tool_names, get_tools_info
 )
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# === 导入统一日志配置 ===
+from logger_config import (
+    create_server_logger,
+    set_request_id,
+    log_request_start,
+    log_request_end,
+    log_tool_call
+)
+
+# 创建logger实例（服务器端，包含request_id）
+logger = create_server_logger("http_agent_server", level=os.getenv("LOG_LEVEL", "INFO"))
 
 # Flask应用配置
 app = Flask(__name__)
@@ -51,7 +59,7 @@ class ToolResultCallbackHandler(BaseCallbackHandler):
             )
         except Exception:
             safe_input = str(input_str)
-        logger.info(f"🛠️ 工具 {tool_name} 开始执行，输入: {safe_input}")
+        log_tool_call(logger, tool_name, {"input": safe_input})
         self.tool_calls.append({
             'name': tool_name,
             'input': safe_input,
@@ -70,7 +78,7 @@ class ToolResultCallbackHandler(BaseCallbackHandler):
                     text = str(output)
         else:
             text = str(output)
-        logger.info(f"✅ 工具执行完成，返回值: {text}")
+        logger.info(f"工具执行完成，返回值: {text[:100]}")
         self.tool_outputs.append(text)
         
         # 更新最后一个工具调用的状态
@@ -80,7 +88,7 @@ class ToolResultCallbackHandler(BaseCallbackHandler):
     
     def on_tool_error(self, error: Exception, **kwargs) -> None:
         """工具执行出错时调用"""
-        logger.error(f"❌ 工具执行出错: {error}")
+        logger.error(f"工具执行出错: {error}", exc_info=True)
         if self.tool_calls:
             self.tool_calls[-1]['status'] = 'error'
             self.tool_calls[-1]['error'] = str(error)
@@ -223,6 +231,11 @@ def completions():
     主要的completions端点，兼容OpenAI API格式
     支持客户端发送prompt并获取AI回复
     """
+    # 为每个请求生成唯一的request_id
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/v1/completions", "POST")
+    
     try:
         # 确保agent已初始化
         initialize_agent_globally()
@@ -230,14 +243,16 @@ def completions():
         # 获取请求数据
         data = request.get_json()
         if not data:
+            logger.warning("未提供JSON数据")
             return jsonify({"error": "未提供JSON数据"}), 400
         
         # 提取prompt参数
         prompt = data.get('prompt', '')
         if not prompt:
+            logger.warning("未提供prompt")
             return jsonify({"error": "未提供prompt"}), 400
         
-        logger.info(f"收到请求 - Prompt: {prompt[:100]}...")
+        logger.info(f"Prompt: {prompt[:100]}...")
         
         # 调用agent处理请求
         try:
@@ -256,7 +271,7 @@ def completions():
             
             # 统一进行后处理，无论是否有工具调用
             final_text = _post_process_response(prompt, output_text, tool_outputs)
-            logger.info("返回后处理结果给客户端")
+            logger.debug("完成后处理")
             
             # 构建响应格式，兼容OpenAI API
             result = {
@@ -276,11 +291,12 @@ def completions():
                 "object": "text_completion"
             }
             
-            logger.info("请求处理成功")
+            log_request_end(logger, 200)
             return jsonify(result)
             
         except Exception as e:
-            logger.error(f"Agent处理出错: {e}")
+            logger.error(f"Agent处理出错: {e}", exc_info=True)
+            log_request_end(logger, 500)
             return jsonify({
                 "error": f"Agent处理错误: {str(e)}",
                 "choices": [
@@ -293,7 +309,8 @@ def completions():
             }), 500
             
     except Exception as e:
-        logger.error(f"请求处理出错: {e}")
+        logger.error(f"请求处理出错: {e}", exc_info=True)
+        log_request_end(logger, 500)
         return jsonify({"error": f"请求处理错误: {str(e)}"}), 500
 
 @app.route('/v1/chat/completions', methods=['POST'])
@@ -301,15 +318,22 @@ def chat_completions():
     """
     聊天completions端点，支持对话格式
     """
+    # 为每个请求生成唯一的request_id
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/v1/chat/completions", "POST")
+    
     try:
         initialize_agent_globally()
         
         data = request.get_json()
         if not data:
+            logger.warning("未提供JSON数据")
             return jsonify({"error": "未提供JSON数据"}), 400
         
         messages = data.get('messages', [])
         if not messages:
+            logger.warning("未提供消息")
             return jsonify({"error": "未提供消息"}), 400
         
         # 将消息转换为prompt
@@ -322,7 +346,7 @@ def chat_completions():
             elif role == 'assistant':
                 prompt += f"Assistant: {content}\n"
         
-        logger.info(f"收到聊天请求 - Messages: {len(messages)}条")
+        logger.info(f"收到 {len(messages)} 条消息")
         
         try:
             # 创建回调处理器
@@ -340,7 +364,7 @@ def chat_completions():
             
             # 统一进行后处理，无论是否有工具调用
             final_text = _post_process_response(prompt, output_text, tool_outputs)
-            logger.info("返回后处理结果给客户端")
+            logger.debug("完成后处理")
             
             result = {
                 "choices": [
@@ -362,11 +386,12 @@ def chat_completions():
                 "object": "chat.completion"
             }
             
-            logger.info("聊天请求处理成功")
+            log_request_end(logger, 200)
             return jsonify(result)
             
         except Exception as e:
-            logger.error(f"Agent处理聊天请求出错: {e}")
+            logger.error(f"Agent处理聊天请求出错: {e}", exc_info=True)
+            log_request_end(logger, 500)
             return jsonify({
                 "error": f"Agent处理错误: {str(e)}",
                 "choices": [
@@ -382,7 +407,8 @@ def chat_completions():
             }), 500
             
     except Exception as e:
-        logger.error(f"聊天请求处理出错: {e}")
+        logger.error(f"聊天请求处理出错: {e}", exc_info=True)
+        log_request_end(logger, 500)
         return jsonify({"error": f"请求处理错误: {str(e)}"}), 500
 
 @app.route('/tools', methods=['GET'])
@@ -461,17 +487,18 @@ def main():
     # 设置LLM端点
     llm_endpoint = args.llm_endpoint
     
-    print("🚀 启动HTTP Agent Server...")
-    print("🧠 LLM端点:", llm_endpoint)
-    print("🔧 可用工具:", get_tool_names())
-    print(f"🌐 服务将在 http://{args.host}:{args.port} 启动")
-    print("📋 可用端点:")
-    print("  - GET  /health - 健康检查")
-    print("  - POST /v1/completions - 文本补全（兼容OpenAI API）")
-    print("  - POST /v1/chat/completions - 聊天补全")
-    print("  - GET  /tools - 列出可用工具")
-    print("  - GET  /status - 服务状态")
-    print("\n按 Ctrl+C 停止服务")
+    logger.info("=" * 60)
+    logger.info("启动HTTP Agent Server")
+    logger.info(f"LLM端点: {llm_endpoint}")
+    logger.info(f"可用工具: {get_tool_names()}")
+    logger.info(f"服务地址: http://{args.host}:{args.port}")
+    logger.info("可用端点:")
+    logger.info("  - GET  /health")
+    logger.info("  - POST /v1/completions")
+    logger.info("  - POST /v1/chat/completions")
+    logger.info("  - GET  /tools")
+    logger.info("  - GET  /status")
+    logger.info("=" * 60)
     
     # 启动Flask应用
     app.run(

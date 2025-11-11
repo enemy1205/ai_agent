@@ -29,9 +29,17 @@ from robot_tools import (
     get_all_tools, get_tool_names, get_tools_info
 )
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# === 导入统一日志配置 ===
+from logger_config import (
+    create_server_logger,
+    set_request_id,
+    log_request_start,
+    log_request_end,
+    log_tool_call
+)
+
+# 创建logger实例
+logger = create_server_logger("http_agent_server_v2", level=os.getenv("LOG_LEVEL", "INFO"))
 
 # Flask应用配置
 app = Flask(__name__)
@@ -65,7 +73,14 @@ class ToolResultCallbackHandler(BaseCallbackHandler):
             )
         except Exception:
             safe_input = str(input_str)
-        logger.info(f"🛠️ 工具 {tool_name} 开始执行，输入: {safe_input}")
+        
+        # 使用统一日志工具
+        try:
+            input_dict = json.loads(safe_input) if isinstance(safe_input, str) else safe_input
+            log_tool_call(logger, tool_name, input_dict if isinstance(input_dict, dict) else {"input": safe_input})
+        except:
+            log_tool_call(logger, tool_name, {"input": safe_input})
+        
         self.tool_calls.append({
             'name': tool_name,
             'input': safe_input,
@@ -85,7 +100,7 @@ class ToolResultCallbackHandler(BaseCallbackHandler):
                     text = str(output)
         else:
             text = str(output)
-        logger.info(f"✅ 工具执行完成，返回值: {text}")
+        logger.info(f"工具执行完成，返回值: {text}")
         self.tool_outputs.append(output)
         
         # 更新最后一个工具调用的状态
@@ -96,7 +111,7 @@ class ToolResultCallbackHandler(BaseCallbackHandler):
     
     def on_tool_error(self, error: Exception, **kwargs) -> None:
         """工具执行出错时调用"""
-        logger.error(f"❌ 工具执行出错: {error}")
+        logger.error(f"工具执行出错: {error}", exc_info=True)
         if self.tool_calls:
             self.tool_calls[-1]['status'] = 'error'
             self.tool_calls[-1]['error'] = str(error)
@@ -283,12 +298,12 @@ def get_or_create_session(session_id: Optional[str] = None) -> tuple[str, Dict]:
         # 如果没有提供 session_id，创建新会话
         if not session_id:
             session_id = str(uuid.uuid4())
-            logger.info(f"📝 创建新会话: {session_id}")
+            logger.info(f"创建新会话: {session_id}")
         
         # 如果会话已存在，更新最后活跃时间
         if session_id in sessions:
             sessions[session_id]['last_active'] = datetime.now()
-            logger.info(f"♻️ 复用现有会话: {session_id}")
+            logger.info(f"复用现有会话: {session_id}")
             return session_id, sessions[session_id]
         
         # 创建新会话
@@ -296,7 +311,7 @@ def get_or_create_session(session_id: Optional[str] = None) -> tuple[str, Dict]:
             # 删除最旧的会话
             oldest_id = min(sessions.keys(), key=lambda k: sessions[k]['last_active'])
             del sessions[oldest_id]
-            logger.warning(f"⚠️ 会话数达到上限，删除最旧会话: {oldest_id}")
+            logger.warning(f"会话数达到上限，删除最旧会话: {oldest_id}")
         
         # 初始化会话记忆
         memory = ConversationBufferWindowMemory(
@@ -319,7 +334,7 @@ def get_or_create_session(session_id: Optional[str] = None) -> tuple[str, Dict]:
             'request_count': 0
         }
         
-        logger.info(f"✅ 新会话已创建: {session_id}")
+        logger.info(f"新会话已创建: {session_id}")
         return session_id, sessions[session_id]
 
 
@@ -332,7 +347,7 @@ def _cleanup_expired_sessions():
     ]
     for sid in expired:
         del sessions[sid]
-        logger.info(f"🗑️ 清理过期会话: {sid}")
+        logger.info(f"清理过期会话: {sid}")
 
 
 def _clean_agent_output(output: str) -> str:
@@ -399,8 +414,8 @@ def _process_agent_request(
     agent_executor = session['agent_executor']
     session['request_count'] += 1
     
-    logger.info(f"📨 处理请求 [会话: {session_id[:8]}...] [第{session['request_count']}次请求]")
-    logger.info(f"💬 用户输入: {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
+    logger.info(f"处理请求 [会话: {session_id[:8]}...] [第{session['request_count']}次请求]")
+    logger.info(f"用户输入: {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
     
     # 创建回调处理器
     callback_handler = ToolResultCallbackHandler()
@@ -436,7 +451,7 @@ def _process_agent_request(
             'intermediate_steps_count': len(intermediate_steps)
         }
         
-        logger.info(f"✅ 请求处理完成 [工具调用: {len(tool_calls)}次]")
+        logger.info(f"请求处理完成 [工具调用: {len(tool_calls)}次]")
         
         return {
             'output': output_text,
@@ -445,7 +460,7 @@ def _process_agent_request(
         }
         
     except Exception as e:
-        logger.error(f"❌ Agent 执行出错: {e}", exc_info=True)
+        logger.error(f"Agent 执行出错: {e}", exc_info=True)
         return {
             'output': f"抱歉，处理您的请求时出现错误：{str(e)}",
             'metadata': {
@@ -487,13 +502,20 @@ def completions():
     文本补全端点（兼容 OpenAI API 格式）
     支持会话管理
     """
+    # 生成并设置请求ID
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/v1/completions", "POST")
+    
     try:
         data = request.get_json()
         if not data:
+            log_request_end(logger, 400)
             return jsonify({"error": "未提供JSON数据"}), 400
         
         prompt = data.get('prompt', '')
         if not prompt:
+            log_request_end(logger, 400)
             return jsonify({"error": "未提供prompt"}), 400
         
         # 获取可选的 session_id
@@ -503,6 +525,7 @@ def completions():
         result = _process_agent_request(prompt, session_id)
         
         if not result['success']:
+            log_request_end(logger, 500)
             return jsonify({
                 "error": result['output'],
                 "metadata": result['metadata']
@@ -527,10 +550,12 @@ def completions():
             "metadata": result['metadata']  # 额外的元数据
         }
         
+        log_request_end(logger, 200)
         return jsonify(response)
         
     except Exception as e:
-        logger.error(f"请求处理出错: {e}")
+        logger.error(f"请求处理出错: {e}", exc_info=True)
+        log_request_end(logger, 500)
         return jsonify({"error": f"请求处理错误: {str(e)}"}), 500
 
 
@@ -540,13 +565,20 @@ def chat_completions():
     聊天补全端点（兼容 OpenAI Chat API 格式）
     推荐使用此端点，支持完整的会话管理
     """
+    # 生成并设置请求ID
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
+    log_request_start(logger, "/v1/chat/completions", "POST")
+    
     try:
         data = request.get_json()
         if not data:
+            log_request_end(logger, 400)
             return jsonify({"error": "未提供JSON数据"}), 400
         
         messages = data.get('messages', [])
         if not messages:
+            log_request_end(logger, 400)
             return jsonify({"error": "未提供消息"}), 400
         
         # 获取会话ID
@@ -561,12 +593,14 @@ def chat_completions():
                 break
         
         if not user_message:
+            log_request_end(logger, 400)
             return jsonify({"error": "未找到用户消息"}), 400
         
         # 处理请求
         result = _process_agent_request(user_message, session_id, include_planning=True)
         
         if not result['success']:
+            log_request_end(logger, 500)
             return jsonify({
                 "error": result['output'],
                 "metadata": result['metadata']
@@ -594,10 +628,12 @@ def chat_completions():
             "metadata": result['metadata']  # 包含会话ID和工具调用信息
         }
         
+        log_request_end(logger, 200)
         return jsonify(response)
         
     except Exception as e:
-        logger.error(f"聊天请求处理出错: {e}")
+        logger.error(f"聊天请求处理出错: {e}", exc_info=True)
+        log_request_end(logger, 500)
         return jsonify({"error": f"请求处理错误: {str(e)}"}), 500
 
 
@@ -627,7 +663,7 @@ def delete_session(session_id):
             return jsonify({"error": "会话不存在"}), 404
         
         del sessions[session_id]
-        logger.info(f"🗑️ 手动删除会话: {session_id}")
+        logger.info(f"手动删除会话: {session_id}")
         return jsonify({"message": "会话已删除", "session_id": session_id})
 
 
@@ -759,35 +795,36 @@ def main():
     SESSION_TIMEOUT = timedelta(hours=args.session_timeout)
     MEMORY_WINDOW_SIZE = args.memory_window
     
-    print("=" * 70)
-    print("🚀 启动 HTTP Agent Server V2")
-    print("=" * 70)
-    print(f"🧠 LLM端点: {llm_endpoint}")
-    print(f"🔧 可用工具: {', '.join(get_tool_names())}")
-    print(f"🌐 服务地址: http://{args.host}:{args.port}")
-    print()
-    print("📋 新功能:")
-    print("  ✅ 会话记忆管理 (每个会话独立的对话历史)")
-    print("  ✅ 增强规划能力 (思考-计划-执行-反馈流程)")
-    print("  ✅ 工具结果反馈循环 (支持最多5轮迭代)")
-    print("  ✅ 多轮对话支持 (记住最近10轮对话)")
-    print()
-    print("📋 可用端点:")
-    print("  - GET  /health - 健康检查")
-    print("  - POST /v1/completions - 文本补全（支持会话）")
-    print("  - POST /v1/chat/completions - 聊天补全（推荐）")
-    print("  - GET  /sessions - 列出所有会话")
-    print("  - GET  /sessions/<id> - 获取会话信息")
-    print("  - DELETE /sessions/<id> - 删除会话")
-    print("  - GET  /tools - 列出可用工具")
-    print("  - GET  /status - 服务状态")
-    print()
-    print(f"⚙️  配置:")
-    print(f"  - 最大会话数: {MAX_SESSIONS}")
-    print(f"  - 会话超时: {args.session_timeout} 小时")
-    print(f"  - 记忆窗口: {MEMORY_WINDOW_SIZE} 轮对话")
-    print("=" * 70)
-    print("\n按 Ctrl+C 停止服务\n")
+    logger.info("=" * 70)
+    logger.info("启动 HTTP Agent Server V2")
+    logger.info("=" * 70)
+    logger.info(f"LLM端点: {llm_endpoint}")
+    logger.info(f"可用工具: {', '.join(get_tool_names())}")
+    logger.info(f"服务地址: http://{args.host}:{args.port}")
+    logger.info("")
+    logger.info("新功能:")
+    logger.info("  - 会话记忆管理 (每个会话独立的对话历史)")
+    logger.info("  - 增强规划能力 (思考-计划-执行-反馈流程)")
+    logger.info("  - 工具结果反馈循环 (支持最多5轮迭代)")
+    logger.info("  - 多轮对话支持 (记住最近10轮对话)")
+    logger.info("")
+    logger.info("可用端点:")
+    logger.info("  - GET  /health - 健康检查")
+    logger.info("  - POST /v1/completions - 文本补全（支持会话）")
+    logger.info("  - POST /v1/chat/completions - 聊天补全（推荐）")
+    logger.info("  - GET  /sessions - 列出所有会话")
+    logger.info("  - GET  /sessions/<id> - 获取会话信息")
+    logger.info("  - DELETE /sessions/<id> - 删除会话")
+    logger.info("  - GET  /tools - 列出可用工具")
+    logger.info("  - GET  /status - 服务状态")
+    logger.info("")
+    logger.info(f"配置:")
+    logger.info(f"  - 最大会话数: {MAX_SESSIONS}")
+    logger.info(f"  - 会话超时: {args.session_timeout} 小时")
+    logger.info(f"  - 记忆窗口: {MEMORY_WINDOW_SIZE} 轮对话")
+    logger.info(f"  - 日志级别: {os.getenv('LOG_LEVEL', 'INFO')}")
+    logger.info("=" * 70)
+    logger.info("\n按 Ctrl+C 停止服务\n")
     
     # 启动Flask应用
     app.run(
