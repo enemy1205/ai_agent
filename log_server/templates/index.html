@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能机器人系统 - 集中式日志管理</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+        
+        .header .stats {
+            display: flex;
+            gap: 20px;
+            font-size: 14px;
+        }
+        
+        .header .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        
+        .filters {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .filters-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .filter-group label {
+            font-size: 12px;
+            color: #666;
+            font-weight: 500;
+        }
+        
+        .filter-group select,
+        .filter-group input {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .filter-group input[type="text"] {
+            width: 100%;
+        }
+        
+        .filter-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+        
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+        
+        .logs-container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .logs-header {
+            padding: 15px 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logs-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        .logs-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .logs-table thead {
+            background: #f8f9fa;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        .logs-table th {
+            padding: 12px 15px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            color: #666;
+            border-bottom: 2px solid #e9ecef;
+        }
+        
+        .logs-table td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 13px;
+        }
+        
+        .logs-table tbody tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .log-level {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        
+        .level-DEBUG { background: #e3f2fd; color: #1976d2; }
+        .level-INFO { background: #e8f5e9; color: #388e3c; }
+        .level-WARNING { background: #fff3e0; color: #f57c00; }
+        .level-ERROR { background: #ffebee; color: #d32f2f; }
+        .level-CRITICAL { background: #f3e5f5; color: #7b1fa2; }
+        
+        .log-device {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 500;
+            background: #e9ecef;
+            color: #495057;
+        }
+        
+        .log-module {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: #667eea;
+        }
+        
+        .log-message {
+            max-width: 500px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .log-message:hover {
+            white-space: normal;
+            word-break: break-word;
+        }
+        
+        .pagination {
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+        }
+        
+        .pagination-info {
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .pagination-buttons {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .empty-state {
+            padding: 60px 20px;
+            text-align: center;
+            color: #999;
+        }
+        
+        .loading {
+            padding: 40px;
+            text-align: center;
+            color: #999;
+        }
+        
+        .connection-status {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        
+        .status-connected { background: #4caf50; }
+        .status-disconnected { background: #f44336; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>智能机器人系统 - 集中式日志管理</h1>
+        <div class="stats">
+            <div class="stat-item">
+                <span class="connection-status" id="connectionStatus"></span>
+                <span id="connectionText">连接中...</span>
+            </div>
+            <div class="stat-item">
+                <span>总日志数:</span>
+                <strong id="totalLogs">-</strong>
+            </div>
+            <div class="stat-item">
+                <span>今日日志:</span>
+                <strong id="todayLogs">-</strong>
+            </div>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="filters">
+            <div class="filters-row">
+                <div class="filter-group">
+                    <label>设备</label>
+                    <select id="filterDevice">
+                        <option value="">全部设备</option>
+                        <option value="server">服务器</option>
+                        <option value="jetson">Jetson机器人</option>
+                        <option value="nuc">NUC</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>模块</label>
+                    <select id="filterModule">
+                        <option value="">全部模块</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>级别</label>
+                    <select id="filterLevel">
+                        <option value="">全部级别</option>
+                        <option value="DEBUG">DEBUG</option>
+                        <option value="INFO">INFO</option>
+                        <option value="WARNING">WARNING</option>
+                        <option value="ERROR">ERROR</option>
+                        <option value="CRITICAL">CRITICAL</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Request ID</label>
+                    <input type="text" id="filterRequestId" placeholder="输入Request ID">
+                </div>
+                <div class="filter-group">
+                    <label>关键词搜索</label>
+                    <input type="text" id="filterKeyword" placeholder="搜索日志内容">
+                </div>
+            </div>
+            <div class="filter-actions">
+                <button class="btn btn-primary" onclick="queryLogs()">查询</button>
+                <button class="btn btn-secondary" onclick="resetFilters()">重置</button>
+                <button class="btn btn-secondary" onclick="toggleAutoRefresh()" id="autoRefreshBtn">开启自动刷新</button>
+            </div>
+        </div>
+        
+        <div class="logs-container">
+            <div class="logs-header">
+                <h2>日志列表</h2>
+                <span id="logsCount">0 条日志</span>
+            </div>
+            <div id="logsTableContainer">
+                <div class="loading">加载中...</div>
+            </div>
+            <div class="pagination" id="pagination" style="display: none;">
+                <div class="pagination-info" id="paginationInfo"></div>
+                <div class="pagination-buttons">
+                    <button class="btn btn-secondary" onclick="changePage(-1)" id="prevBtn">上一页</button>
+                    <button class="btn btn-secondary" onclick="changePage(1)" id="nextBtn">下一页</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // WebSocket连接
+        const socket = io();
+        let currentPage = 1;
+        let autoRefresh = false;
+        let autoRefreshInterval = null;
+        
+        socket.on('connect', () => {
+            document.getElementById('connectionStatus').className = 'connection-status status-connected';
+            document.getElementById('connectionText').textContent = '已连接';
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('connectionStatus').className = 'connection-status status-disconnected';
+            document.getElementById('connectionText').textContent = '已断开';
+        });
+        
+        socket.on('new_log', (log) => {
+            if (autoRefresh) {
+                queryLogs();
+            }
+        });
+        
+        // 加载模块列表
+        async function loadModules() {
+            const device = document.getElementById('filterDevice').value;
+            const url = device ? `/api/modules?device=${device}` : '/api/modules';
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                const select = document.getElementById('filterModule');
+                select.innerHTML = '<option value="">全部模块</option>';
+                
+                if (data.success && data.modules) {
+                    for (const [deviceName, modules] of Object.entries(data.modules)) {
+                        modules.forEach(module => {
+                            const option = document.createElement('option');
+                            option.value = module;
+                            option.textContent = `${deviceName}/${module}`;
+                            select.appendChild(option);
+                        });
+                    }
+                }
+            } catch (error) {
+                console.error('加载模块列表失败:', error);
+            }
+        }
+        
+        // 查询日志
+        async function queryLogs(page = 1) {
+            currentPage = page;
+            const params = new URLSearchParams({
+                page: page,
+                page_size: 100,
+                device: document.getElementById('filterDevice').value,
+                module: document.getElementById('filterModule').value,
+                level: document.getElementById('filterLevel').value,
+                request_id: document.getElementById('filterRequestId').value,
+                keyword: document.getElementById('filterKeyword').value
+            });
+            
+            document.getElementById('logsTableContainer').innerHTML = '<div class="loading">查询中...</div>';
+            
+            try {
+                const response = await fetch(`/api/logs/query?${params}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    renderLogs(data.data);
+                    renderPagination(data);
+                    document.getElementById('logsCount').textContent = `${data.total} 条日志`;
+                } else {
+                    document.getElementById('logsTableContainer').innerHTML = 
+                        '<div class="empty-state">查询失败: ' + (data.error || '未知错误') + '</div>';
+                }
+            } catch (error) {
+                document.getElementById('logsTableContainer').innerHTML = 
+                    '<div class="empty-state">查询失败: ' + error.message + '</div>';
+            }
+        }
+        
+        // 渲染日志表格
+        function renderLogs(logs) {
+            if (logs.length === 0) {
+                document.getElementById('logsTableContainer').innerHTML = 
+                    '<div class="empty-state">暂无日志数据</div>';
+                return;
+            }
+            
+            let html = '<table class="logs-table"><thead><tr>';
+            html += '<th>时间</th><th>级别</th><th>设备</th><th>模块</th><th>Request ID</th><th>消息</th>';
+            html += '</tr></thead><tbody>';
+            
+            logs.forEach(log => {
+                const time = new Date(log.timestamp).toLocaleString('zh-CN');
+                html += `<tr>
+                    <td>${time}</td>
+                    <td><span class="log-level level-${log.level}">${log.level}</span></td>
+                    <td><span class="log-device">${log.device_name}</span></td>
+                    <td><span class="log-module">${log.module}</span></td>
+                    <td>${log.request_id || '-'}</td>
+                    <td class="log-message" title="${escapeHtml(log.message)}">${escapeHtml(log.message)}</td>
+                </tr>`;
+            });
+            
+            html += '</tbody></table>';
+            document.getElementById('logsTableContainer').innerHTML = html;
+        }
+        
+        // 渲染分页
+        function renderPagination(data) {
+            const pagination = document.getElementById('pagination');
+            if (data.total_pages > 1) {
+                pagination.style.display = 'flex';
+                document.getElementById('paginationInfo').textContent = 
+                    `第 ${data.page} 页，共 ${data.total_pages} 页，共 ${data.total} 条`;
+                document.getElementById('prevBtn').disabled = data.page <= 1;
+                document.getElementById('nextBtn').disabled = data.page >= data.total_pages;
+            } else {
+                pagination.style.display = 'none';
+            }
+        }
+        
+        // 切换页面
+        function changePage(delta) {
+            queryLogs(currentPage + delta);
+        }
+        
+        // 重置筛选
+        function resetFilters() {
+            document.getElementById('filterDevice').value = '';
+            document.getElementById('filterModule').value = '';
+            document.getElementById('filterLevel').value = '';
+            document.getElementById('filterRequestId').value = '';
+            document.getElementById('filterKeyword').value = '';
+            loadModules();
+            queryLogs(1);
+        }
+        
+        // 切换自动刷新
+        function toggleAutoRefresh() {
+            autoRefresh = !autoRefresh;
+            const btn = document.getElementById('autoRefreshBtn');
+            if (autoRefresh) {
+                btn.textContent = '关闭自动刷新';
+                autoRefreshInterval = setInterval(() => queryLogs(currentPage), 5000);
+            } else {
+                btn.textContent = '开启自动刷新';
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }
+            }
+        }
+        
+        // 加载统计信息
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/logs/stats');
+                const data = await response.json();
+                if (data.success) {
+                    document.getElementById('totalLogs').textContent = data.stats.total || 0;
+                    document.getElementById('todayLogs').textContent = data.stats.today || 0;
+                }
+            } catch (error) {
+                console.error('加载统计信息失败:', error);
+            }
+        }
+        
+        // HTML转义
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // 设备选择变化时重新加载模块
+        document.getElementById('filterDevice').addEventListener('change', loadModules);
+        
+        // 初始化
+        loadModules();
+        loadStats();
+        queryLogs(1);
+        setInterval(loadStats, 30000); // 每30秒更新统计
+    </script>
+</body>
+</html>
+

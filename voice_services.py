@@ -64,6 +64,14 @@ TTS_DEFAULT_CODEC = "wav"        # 输出格式
 
 app = Flask(__name__)
 
+# 添加响应后处理，确保连接正确关闭
+@app.after_request
+def after_request(response):
+    """确保响应后连接正确关闭"""
+    # 设置连接关闭头，避免 keepalive 导致连接积累
+    response.headers['Connection'] = 'close'
+    return response
+
 # --- 说话人识别配置 ---
 SPEAKER_MODEL_DIR = os.getenv("SPEAKER_MODEL_DIR", "/home/lxc/.wespeaker/chinese")
 SPEAKER_DB_DIR = os.getenv("SPEAKER_DB_DIR", "./speaker_db")
@@ -415,4 +423,6 @@ if __name__ == '__main__':
     logger.info("  - POST /speaker/verify")
     logger.info("=" * 60)
     
-    app.run(host=host, port=port, debug=False)
+    # 使用 threaded=True 支持并发连接，避免连接阻塞
+    # 添加连接超时和 keepalive 配置
+    app.run(host=host, port=port, debug=False, threaded=True)

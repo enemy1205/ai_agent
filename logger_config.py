@@ -9,8 +9,12 @@ import sys
 import os
 from pathlib import Path
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
+import json
+import queue
+import requests
+
 
 # 全局请求ID存储（用于追踪分布式请求）
 _request_id_storage = threading.local()
@@ -24,26 +28,110 @@ class RequestIDFilter(logging.Filter):
         return True
 
 
-class ColoredFormatter(logging.Formatter):
-    """彩色日志格式化器（终端输出）"""
+class RemoteLogHandler(logging.Handler):
+    """远程日志推送Handler"""
     
-    # ANSI颜色码
-    COLORS = {
-        'DEBUG': '\033[36m',      # 青色
-        'INFO': '\033[32m',       # 绿色
-        'WARNING': '\033[33m',    # 黄色
-        'ERROR': '\033[31m',      # 红色
-        'CRITICAL': '\033[35m',   # 紫色
-        'RESET': '\033[0m'
-    }
-    
-    def format(self, record):
-        # 添加颜色
-        levelname = record.levelname
-        if levelname in self.COLORS:
-            record.levelname = f"{self.COLORS[levelname]}{levelname}{self.COLORS['RESET']}"
+    def __init__(self, log_server_url: str, device_name: str, max_queue_size: int = 1000):
+        """
+        初始化远程日志Handler
         
-        return super().format(record)
+        Args:
+            log_server_url: 日志服务器URL（如 http://127.0.0.1:8888）
+            device_name: 设备名称（server/jetson/nuc）
+            max_queue_size: 队列最大长度，超过后丢弃旧日志
+        """
+        super().__init__()
+        self.log_server_url = log_server_url.rstrip('/')
+        self.device_name = device_name
+        self.max_queue_size = max_queue_size
+        
+        # 使用队列存储日志，后台线程处理
+        self.log_queue = queue.Queue(maxsize=max_queue_size)
+        self._stop_event = threading.Event()
+        
+        # 启动后台推送线程
+        self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name="RemoteLogWorker")
+        self._worker_thread.start()
+    
+    def emit(self, record):
+        """发送日志记录（非阻塞，放入队列）"""
+        try:
+            # 格式化时间戳
+            timestamp = datetime.fromtimestamp(record.created).isoformat()
+            
+            # 构建日志数据
+            log_data = {
+                'timestamp': timestamp,
+                'level': record.levelname,
+                'module': record.name,
+                'request_id': getattr(record, 'request_id', None),
+                'message': record.getMessage(),
+                'file': getattr(record, 'pathname', None),
+                'line': getattr(record, 'lineno', None),
+                'device': self.device_name
+            }
+            
+            # 非阻塞放入队列，如果队列满了就丢弃（避免阻塞主流程）
+            try:
+                self.log_queue.put_nowait(log_data)
+            except queue.Full:
+                # 队列满了，丢弃这条日志（不影响主流程）
+                pass
+        
+        except Exception:
+            # 任何异常都静默处理，不影响主流程
+            pass
+    
+    def _worker_loop(self):
+        """后台工作线程：从队列取日志并发送到服务器"""
+        while not self._stop_event.is_set():
+            try:
+                # 从队列获取日志（带超时，以便定期检查停止事件）
+                try:
+                    log_data = self.log_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                
+                # 发送日志到服务器
+                self._send_single_log(log_data)
+                
+                # 标记任务完成
+                self.log_queue.task_done()
+                
+            except Exception:
+                # 任何异常都静默处理，继续处理下一条日志
+                pass
+    
+    def _send_single_log(self, log_data):
+        """发送单条日志到服务器（带超时，快速失败）"""
+        try:
+            response = requests.post(
+                f"{self.log_server_url}/api/logs",
+                json=log_data,
+                timeout=0.5,  # 0.5秒超时，快速失败
+                headers={'Connection': 'close'}  # 确保连接关闭
+            )
+            # 只检查状态码，不关心具体内容
+            if response.status_code != 200:
+                # 非200状态码，静默失败
+                pass
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.RequestException):
+            # 网络错误，静默失败（不影响主流程）
+            pass
+        except Exception:
+            # 其他异常，静默失败
+            pass
+    
+    def close(self):
+        """关闭Handler，等待队列处理完成"""
+        # 设置停止事件
+        self._stop_event.set()
+        
+        # 等待工作线程结束（最多等待2秒）
+        if self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=2.0)
+        
+        super().close()
 
 
 def setup_logger(
@@ -55,7 +143,9 @@ def setup_logger(
     console_output: bool = True,
     file_output: bool = True,
     json_format: bool = False,
-    is_robot: bool = False
+    is_robot: bool = False,
+    remote_log_url: str = None,
+    device_name: str = None
 ) -> logging.Logger:
     """
     创建统一配置的logger
@@ -97,7 +187,7 @@ def setup_logger(
             # 服务端：详细格式（包含请求ID）
             console_format = '%(asctime)s [%(levelname)s] [%(name)s] [ReqID:%(request_id)s] %(message)s'
         
-        console_formatter = ColoredFormatter(
+        console_formatter = logging.Formatter(
             console_format,
             datefmt='%H:%M:%S'
         )
@@ -143,6 +233,27 @@ def setup_logger(
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
     
+    # === 远程日志推送 ===
+    if remote_log_url:
+        # 自动检测设备名称
+        if device_name is None:
+            # 从环境变量获取，如果没有则根据模块类型推断
+            device_name = os.getenv('LOG_DEVICE_NAME')
+            if not device_name:
+                device_name = 'jetson' if (is_robot or name in ['pipeline', 'mqtt_manager']) else 'server'
+        
+        try:
+            remote_handler = RemoteLogHandler(
+                log_server_url=remote_log_url,
+                device_name=device_name,
+                max_queue_size=1000  # 队列最大1000条，超过后丢弃
+            )
+            remote_handler.setLevel(logging.DEBUG)
+            logger.addHandler(remote_handler)
+        except Exception:
+            # 远程日志推送失败不影响主流程
+            pass
+    
     return logger
 
 
@@ -164,38 +275,53 @@ def clear_request_id():
 
 # === 预定义的logger配置 ===
 
-def create_robot_logger(name: str, level: str = "INFO") -> logging.Logger:
+def create_robot_logger(name: str, level: str = "INFO", remote_log_url: str = None) -> logging.Logger:
     """
-    创建机器人端logger（轻量级）
+    创建机器人端logger
     - 简洁格式
     - 控制台输出为主
     - 文件日志可选
+    - 可选远程日志推送
     """
+    # 从环境变量获取远程日志URL
+    if remote_log_url is None:
+        remote_log_url = os.getenv('LOG_SERVER_URL')
+    
     return setup_logger(
         name=name,
         level=level,
         console_output=True,
         file_output=True,
         json_format=False,
-        is_robot=True
+        is_robot=True,
+        remote_log_url=remote_log_url,
+        device_name=os.getenv('LOG_DEVICE_NAME', 'jetson')
     )
 
 
-def create_server_logger(name: str, level: str = "INFO", json_format: bool = False) -> logging.Logger:
+def create_server_logger(name: str, level: str = "INFO", json_format: bool = False, remote_log_url: str = None) -> logging.Logger:
     """
-    创建服务端logger（详细）
+    创建服务端logger
     - 详细格式
     - 支持请求ID追踪
     - 控制台+文件双输出
     - 可选JSON格式
+    - 可选远程日志推送
     """
+    # 从环境变量获取远程日志URL
+    if remote_log_url is None:
+        # remote_log_url = os.getenv('LOG_SERVER_URL')
+        remote_log_url = "http://127.0.0.1:8888"
+    
     return setup_logger(
         name=name,
         level=level,
         console_output=True,
         file_output=True,
         json_format=json_format,
-        is_robot=False
+        is_robot=False,
+        remote_log_url=remote_log_url,
+        device_name=os.getenv('LOG_DEVICE_NAME', 'server')
     )
 
 
@@ -206,9 +332,27 @@ def log_request_start(logger: logging.Logger, endpoint: str, method: str = "POST
     logger.info(f"请求开始 [{method}] {endpoint}")
 
 
-def log_request_end(logger: logging.Logger, endpoint: str, duration_ms: float, status: str = "success"):
-    """记录请求结束"""
-    logger.info(f"请求结束 [{endpoint}] 耗时: {duration_ms:.2f}ms 状态: {status}")
+def log_request_end(logger: logging.Logger, status_code: int = None, endpoint: str = None, duration_ms: float = None, status: str = "success"):
+    """记录请求结束
+    
+    Args:
+        logger: logger实例
+        status_code: HTTP状态码（如200, 400, 500）
+        endpoint: 端点路径（可选）
+        duration_ms: 耗时（毫秒，可选）
+        status: 状态描述（可选）
+    """
+    if status_code is not None:
+        # 简化调用：只传状态码
+        logger.info(f"请求完成 状态码: {status_code}")
+    elif endpoint:
+        # 完整调用：包含端点和耗时
+        if duration_ms is not None:
+            logger.info(f"请求结束 [{endpoint}] 耗时: {duration_ms:.2f}ms 状态: {status}")
+        else:
+            logger.info(f"请求结束 [{endpoint}] 状态: {status}")
+    else:
+        logger.info(f"请求结束 状态: {status}")
 
 
 def log_tool_call(logger: logging.Logger, tool_name: str, params: dict = None):
