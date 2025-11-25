@@ -249,7 +249,9 @@ class NavigationManager:
                     # 如果当前有任务在执行,检查是否完成
                     if self.current_task is not None:
                         if self._is_task_completed(self.current_task):
-                            log_task_complete(logger, self.current_task.task_type.value)
+                            # 计算任务持续时间
+                            duration_s = time.time() - self.current_task.start_time if self.current_task.start_time else 0.0
+                            log_task_complete(logger, self.current_task.task_type.value, duration_s)
                             # 记录任务完成时间,开始等待
                             self.task_completion_time = time.time()
                             self.current_task = None

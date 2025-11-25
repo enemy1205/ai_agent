@@ -50,11 +50,11 @@ ASR_ENDPOINT = f"{VOICE_SERVER_BASE_URL}/asr/recognize"
 TTS_ENDPOINT = f"{VOICE_SERVER_BASE_URL}/tts/synthesize"
 SPEAKER_VERIFY_ENDPOINT = f"{VOICE_SERVER_BASE_URL}/speaker/verify"
 
-# 本地LLM服务配置
+# LLM服务配置（支持本地和云端）
 LLM_SERVER_IP = "202.38.214.151" # <-- 修改为你的大模型服务IP
 LLM_SERVER_PORT = 5000           # <-- 修改为你的大模型服务端口
 LLM_API_BASE = f"http://{LLM_SERVER_IP}:{LLM_SERVER_PORT}/v1"
-LLM_ENDPOINT = f"{LLM_API_BASE}/completions"
+LLM_ENDPOINT = f"{LLM_API_BASE}/chat/completions"  # 使用 chat/completions 端点（支持记忆功能）
 
 # LLM参数配置 - 现在由服务器端统一管理
 
@@ -77,6 +77,8 @@ playback_lock = threading.Lock()  # 播放锁，确保同一时间只有一个�
 
 # --- 对话历史 ---
 conversation_history = []
+# 会话ID（用于维持对话记忆）
+llm_session_id = None
 
 # --- 声纹认证控制 ---
 ENABLE_SPEAKER_AUTH = os.getenv("ENABLE_SPEAKER_AUTH", "false").lower() == "true"  # 声纹认证开关
@@ -400,22 +402,32 @@ def handle_captured_speech(audio_data_float32, sample_rate):
     logger.info(f"认证通过: {name} (置信度: {conf:.2f})")
     process_with_llm(recognized_text)
 
-def call_local_llm(prompt):
+def call_local_llm(messages, session_id=None):
     """
-    调用本地部署的大模型服务
+    调用LLM服务（支持云端和本地，使用 chat/completions 端点）
+    
+    Args:
+        messages: 消息列表，格式为 [{"role": "user", "content": "..."}, ...]
+        session_id: 可选的会话ID，用于维持对话记忆
+    
+    Returns:
+        (reply_text, success, new_session_id): 回复文本、是否成功、新的会话ID
     """
+    global llm_session_id
     try:
-        # 构建请求数据 - 不传参数，让服务器端使用自己的配置
+        # 构建请求数据 - 使用 chat/completions 格式
         data = {
-            "prompt": prompt,
-            "stop": ["\n\n", "Human:", "Assistant:"]
+            "messages": messages
         }
+        
+        # 如果有会话ID，添加到请求中
+        if session_id:
+            data["session_id"] = session_id
         
         headers = {
             "Content-Type": "application/json"
         }
         
-        logger.info("调用LLM服务...")
         response = requests.post(
             LLM_ENDPOINT,
             headers=headers,
@@ -426,50 +438,63 @@ def call_local_llm(prompt):
         if response.status_code == 200:
             result = response.json()
             if "choices" in result and len(result["choices"]) > 0:
-                reply_text = result["choices"][0]["text"].strip()
-                logger.info("LLM响应成功")
-                return reply_text, True
+                # 提取回复内容
+                choice = result["choices"][0]
+                if "message" in choice:
+                    reply_text = choice["message"].get("content", "").strip()
+                else:
+                    # 兼容旧格式
+                    reply_text = choice.get("text", "").strip()
+                
+                # 提取会话ID（如果返回了）
+                metadata = result.get("metadata", {})
+                if metadata.get("session_id"):
+                    llm_session_id = metadata["session_id"]
+                
+                return reply_text, True, llm_session_id
             else:
                 logger.error("LLM服务返回格式异常")
-                return "", False
+                return "", False, session_id
         else:
             logger.error(f"LLM服务调用失败，状态码: {response.status_code}")
             logger.debug(f"错误信息: {response.text}")
-            return "", False
+            return "", False, session_id
             
     except requests.exceptions.ConnectionError:
         logger.error(f"无法连接到LLM服务 ({LLM_ENDPOINT})")
-        return "", False
+        return "", False, session_id
     except requests.exceptions.Timeout:
         logger.error("LLM服务调用超时")
-        return "", False
+        return "", False, session_id
     except Exception as e:
         logger.error(f"LLM服务调用出错: {e}", exc_info=True)
-        return "", False
+        return "", False, session_id
 
 def chat_with_local_llm(user_input, conversation_history):
     """
-    与本地LLM进行对话，支持上下文历史
+    与LLM进行对话，使用 chat/completions 格式
+    兼容 http_agent_server_v2.py（本地LLM，有记忆）和 http_agent_server_v3.py（云端LLM，有记忆）
+    
+    两个版本都支持服务器端会话记忆，因此只需要传递当前用户消息即可。
+    服务器会自动管理对话历史，无需客户端传递历史消息。
     """
-    # 构建完整的提示词 (可加入 SYSTEM_PROMPT)
-    # full_prompt = f"{SYSTEM_PROMPT}\n\n"
-    full_prompt = ""
+    global llm_session_id
     
-    # 添加对话历史 (只保留最近几轮)
-    for msg in conversation_history[-6:]: # 例如只保留最近3轮对话
-        if msg["role"] == "user":
-            full_prompt += f"Human: {msg['content']}\n"
-        elif msg["role"] == "assistant":
-            full_prompt += f"Assistant: {msg['content']}\n"
+    # 构建消息列表（只包含当前用户消息，服务器端会管理历史）
+    messages = [{
+        "role": "user",
+        "content": user_input
+    }]
     
-    # 添加当前用户输入
-    full_prompt += f"Human: {user_input}\nAssistant:"
-    
-    # 调用LLM
-    reply, success = call_local_llm(full_prompt)
+    # 调用LLM（使用会话ID以维持记忆）
+    reply, success, new_session_id = call_local_llm(messages, llm_session_id)
     
     if success and reply:
-        # 更新对话历史
+        # 更新会话ID（服务器返回新的或现有的session_id）
+        if new_session_id:
+            llm_session_id = new_session_id
+        
+        # 更新本地对话历史（用于日志记录和备用）
         updated_history = conversation_history + [
             {"role": "user", "content": user_input},
             {"role": "assistant", "content": reply}
@@ -624,12 +649,12 @@ def test_server_connections():
     except:
         logger.error(f"无法连接TTS服务 ({TTS_ENDPOINT})")
 
-    # 测试 LLM (发送一个简单请求)
+    # 测试 LLM (发送一个简单请求，使用 chat/completions 格式)
     try:
         data = {
-            "prompt": "Hello, just reply 'OK' please.",
-            "max_tokens": 10,
-            "temperature": 0.7,
+            "messages": [
+                {"role": "user", "content": "Hello, just reply 'OK' please."}
+            ]
         }
         headers = {"Content-Type": "application/json"}
         response = requests.post(LLM_ENDPOINT, headers=headers, json=data, timeout=10)
