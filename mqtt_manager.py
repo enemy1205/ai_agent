@@ -2,11 +2,12 @@
 # coding=UTF-8
 import numpy as np
 import rospy
+import math
+from tf.transformations import euler_matrix, translation_matrix, concatenate_matrices, euler_from_matrix
 from geometry_msgs.msg import PoseStamped, Quaternion
 from navigation_msgs.msg import NavigationStatus
-import math
-from imrobot_msg.msg import ArmDrive, ArmStatus,ArmPositionDrive
-from std_msgs.msg import Int32, Bool
+from imrobot_msg.msg import ArmDrive, ArmStatus, ArmPositionDrive
+from std_msgs.msg import Int32
 import paho.mqtt.client as mqtt
 import ast
 import time
@@ -15,6 +16,9 @@ import threading
 from collections import deque
 from enum import Enum
 import os
+import json
+from vision_msgs_custom.srv import DetectAndGrasp, DetectAndGraspRequest
+from vision_msgs_custom.srv import GetArmPose
 
 # === 导入统一日志配置 ===
 from logger_config import (
@@ -42,18 +46,19 @@ class Task:
         self.task_type = task_type
         self.payload = payload
         self.start_time = None
-        
-    def __repr__(self):
-        return f"Task(type={self.task_type.value}, payload={self.payload})"
 
-class NavigationManager:
+class RobotTaskManager:
     def __init__(self):
         # 状态记录
         self.nav_status = 0
         self.last_nav_status = None
         self.arm_running_status = False
         self.last_arm_running_status = None
-
+        self.detect_service_name = "/vision/get_grasp_pose"
+        self.detect_client = None
+        self.arm_pose_service_name = "/dobot/get_pose"
+        self.arm_pose_client = None
+        
         # 任务队列
         self.task_queue = deque()
         self.current_task = None
@@ -76,6 +81,9 @@ class NavigationManager:
         logger.info("任务队列执行器已启动")
         logger.info(f"任务完成后等待时间: {self.task_completion_delay}秒") 
 
+        # 初始化服务代理
+        self._init_service_proxy()
+
     def init_ros(self):
         # 初始化发布者
         self.pub_nav_goal = rospy.Publisher("/move_base_simple/goal", PoseStamped, queue_size=10)
@@ -83,8 +91,22 @@ class NavigationManager:
         self.pub_cmd_end_effector = rospy.Publisher("/cmdeffector", Int32, queue_size=10)
         # 订阅状态（用于日志记录）
         rospy.Subscriber("/navigation_status", NavigationStatus, self.update_nav_status, queue_size=10)
-        rospy.Subscriber("/arm_status", ArmStatus, self.update_arm_status, queue_size=10)
+        rospy.Subscriber("/Arm_Drag_State", ArmStatus, self.update_arm_status, queue_size=10)
 
+    def _init_service_proxy(self):
+        try:
+            rospy.wait_for_service(self.detect_service_name, timeout=5.0)
+            self.detect_client = rospy.ServiceProxy(self.detect_service_name, DetectAndGrasp)
+            logger.info(f"视觉服务 {self.detect_service_name} 已连接")
+        except Exception as e:
+            logger.warning(f"视觉服务连接失败: {e}")
+        try:
+            rospy.wait_for_service(self.arm_pose_service_name, timeout=2.0)
+            self.arm_pose_client = rospy.ServiceProxy(self.arm_pose_service_name, GetArmPose)
+            logger.info(f"机械臂位姿服务 {self.arm_pose_service_name} 已连接")
+        except Exception as e:
+            logger.warning(f"机械臂位姿服务连接失败: {e}")
+            
     def update_arm_status(self, data):
         """更新机械臂状态"""
         with self.lock:
@@ -219,6 +241,141 @@ class NavigationManager:
         # 直接发布
         self.pub_cmd_end_effector.publish(Int32(command))
         logger.info(f"已将夹爪命令 {command} 发送到 /cmdeffector 话题")
+
+
+    def get_current_pose_matrix(self):
+        """
+        调用 /dobot/get_pose 获取当前位姿，并转换为 4x4 Flatten Matrix (单位: 米)
+        """
+        if self.arm_pose_client is None:
+            self._init_service_proxy()
+            if self.arm_pose_client is None:
+                return None
+
+        try:
+            # 1. 调用服务
+            resp = self.arm_pose_client()
+            
+            if not resp.success or len(resp.pose) < 6:
+                logger.error(f"获取机械臂位姿失败: {resp.message}")
+                return None
+
+            # resp.pose 是 [x, y, z, rx, ry, rz] (单位: mm, 度)
+            x_mm, y_mm, z_mm = resp.pose[0], resp.pose[1], resp.pose[2]
+            rx_deg, ry_deg, rz_deg = resp.pose[3], resp.pose[4], resp.pose[5]
+
+            # 2. 单位转换
+            # 距离: mm -> meter
+            x_m = x_mm / 1000.0
+            y_m = y_mm / 1000.0
+            z_m = z_mm / 1000.0
+            
+            # 角度: degree -> radian
+            rx_rad = math.radians(rx_deg)
+            ry_rad = math.radians(ry_deg)
+            rz_rad = math.radians(rz_deg)
+
+            # 3. 构建矩阵 (Dobot 通常是 XYZ 顺序的欧拉角，请根据实际情况确认)
+            # 使用 tf.transformations 构建
+            # 注意：Dobot 的旋转轴定义可能不同，通常是 rz(yaw), ry(pitch), rx(roll) 或者 rx, ry, rz
+            # 这里假设是标准的 sxyz (static xyz)
+            mat_rot = euler_matrix(rx_rad, ry_rad, rz_rad, 'sxyz')
+            mat_trans = translation_matrix((x_m, y_m, z_m))
+            
+            # 组合旋转和平移
+            mat_final = concatenate_matrices(mat_trans, mat_rot)
+            
+            # 4. 拉平为列表返回
+            return mat_final.flatten().tolist()
+
+        except rospy.ServiceException as e:
+            logger.error(f"调用位姿服务异常: {e}")
+            return None
+        
+        
+    def request_vision_grasp(self, target_name: str):
+        """
+        1. 获取当前机械臂位姿
+        2. 调用 Jetson 服务
+        3. 发布控制指令
+        """
+        logger.info(f"开始处理视觉抓取请求: {target_name}")
+        
+        # 1. 获取当前位姿 (Context)
+        current_pose_flat = self.get_current_pose_matrix()
+        
+        if current_pose_flat is None:
+            logger.error("无法获取机械臂当前位姿，放弃抓取")
+            return False
+
+        # 打印/记录当前位姿（flatten 矩阵 + 解析后的平移与欧拉角）
+        try:
+            logger.info(f"当前位姿矩阵(flatten): {current_pose_flat}")
+            mat = np.array(current_pose_flat).reshape((4, 4))
+            tx_curr = float(mat[0, 3])
+            ty_curr = float(mat[1, 3])
+            tz_curr = float(mat[2, 3])
+            rx_curr, ry_curr, rz_curr = euler_from_matrix(mat, 'sxyz')
+            rx_deg = math.degrees(rx_curr)
+            ry_deg = math.degrees(ry_curr)
+            rz_deg = math.degrees(rz_curr)
+            logger.info(f"当前位姿 (m,deg): x={tx_curr:.4f}, y={ty_curr:.4f}, z={tz_curr:.4f}, rx={rx_deg:.2f}, ry={ry_deg:.2f}, rz={rz_deg:.2f}")
+        except Exception as e:
+            logger.warning(f"无法解析当前位姿详情: {e}")
+
+        if self.detect_client is None:
+            self._init_service_proxy()
+            if self.detect_client is None: return False
+
+        # 2. 调用服务 (NUC -> Jetson)
+        try:
+            req = DetectAndGraspRequest()
+            req.target_name = target_name
+            req.current_gripper_pose = current_pose_flat # 传入当前位姿
+            
+            logger.info("正在调用 Jetson 视觉服务...")
+            resp = self.detect_client(req)
+            
+            if resp.success and len(resp.target_pose) == 6:
+                # 3. 解析结果 (Jetson 返回单位: m / rad)
+                tx, ty, tz, trx, try_, trz = resp.target_pose
+                logger.info(f"视觉计算成功! 目标(米/弧度): {tx:.3f}, {ty:.3f}, {tz:.3f}")
+
+                # 3.1 转换为机械臂控制所需单位: mm / deg
+                tx_mm = tx * 1000.0
+                ty_mm = ty * 1000.0
+                tz_mm = tz * 1000.0
+                trx_deg = math.degrees(trx)
+                try_deg = math.degrees(try_)
+                trz_deg = math.degrees(trz)
+                logger.info(
+                    "将发送给机械臂的目标位姿(毫米/度): "
+                    f"x={tx_mm:.3f}, y={ty_mm:.3f}, z={tz_mm:.3f}, "
+                    f"rx={trx_deg:.3f}, ry={try_deg:.3f}, rz={trz_deg:.3f}"
+                )
+                
+                # 4. 生成任务
+                # 任务1: 移动到目标位置 (单位: mm/deg)
+                pose_payload = {
+                    "x": tx_mm,
+                    "y": ty_mm,
+                    "z": tz_mm,
+                    "rx": trx_deg,
+                    "ry": try_deg,
+                    "rz": trz_deg,
+                }
+                self.add_task(TaskType.ARM_COORDINATE, pose_payload)
+                
+                # 任务2: 闭合夹爪
+                self.add_task(TaskType.GRIPPER, {"command": 1})
+                return True
+            else:
+                logger.warning("视觉识别失败或未找到目标")
+                return False
+                
+        except rospy.ServiceException as e:
+            logger.error(f"服务调用异常: {e}")
+            return False
 
     def add_task(self, task_type, payload):
         """添加任务到队列"""
@@ -428,7 +585,8 @@ MQTT_TOPICS = [
     ("robot/arm/control", 1),
     ("robot/arm/coordinate", 1),
     ("robot/gripper/control",1),
-    ("robot/navigation_status", 1)
+    ("robot/navigation_status", 1),
+    ("robot/vision/grasp", 1)
 ]
 
 
@@ -494,6 +652,8 @@ def on_message(client, userdata, msg):
             handle_arm_coordinate_command(payload)
         elif "gripper/control" in msg.topic:
             handle_gripper_command(payload)
+        elif msg.topic == "robot/vision/grasp":
+            handle_vision_grasp_command(payload)
             
     except Exception as e:
         logger.error(f"处理消息时出错: {str(e)}", exc_info=True)
@@ -532,8 +692,8 @@ def handle_navigation(payload):
             logger.info(f"目标朝向: {orientation}")
 
         # 添加到任务队列
-        if nav_manager:
-            nav_manager.add_task(TaskType.NAVIGATION, payload)
+        if task_manager:
+            task_manager.add_task(TaskType.NAVIGATION, payload)
     else:
         logger.warning(f"导航指令格式不正确: {payload}")
 
@@ -559,8 +719,8 @@ def handle_arm_command(payload):
         logger.info(f"机械臂命令: {command_desc}（指令值: {command}）")
         
         # 添加到任务队列
-        if nav_manager:
-            nav_manager.add_task(TaskType.ARM_COMMAND, payload)
+        if task_manager:
+            task_manager.add_task(TaskType.ARM_COMMAND, payload)
     else:
         logger.warning("机械臂指令格式不正确，需为字典类型")
 
@@ -580,8 +740,8 @@ def handle_arm_coordinate_command(payload):
         logger.info(f"机械臂坐标指令: 位置({x}, {y}, {z}), 姿态({rx}, {ry}, {rz})")
         
         # 添加到任务队列
-        if nav_manager:
-            nav_manager.add_task(TaskType.ARM_COORDINATE, payload)
+        if task_manager:
+            task_manager.add_task(TaskType.ARM_COORDINATE, payload)
     else:
         logger.warning("带坐标机械臂指令格式不正确，需为字典类型")
 
@@ -597,10 +757,31 @@ def handle_gripper_command(payload):
             return
         
         # 添加到任务队列
-        if nav_manager:
-            nav_manager.add_task(TaskType.GRIPPER, payload)
+        if task_manager:
+            task_manager.add_task(TaskType.GRIPPER, payload)
     else:
         logger.warning("机械爪指令格式不正确，需为字典类型")
+
+
+def handle_vision_grasp_command(payload):
+    """处理视觉抓取指令 - 调用视觉服务并派发机械臂任务"""
+    logger.info("收到视觉抓取指令")
+
+    if isinstance(payload, dict):
+        object_name = payload.get("object_name") or payload.get("target")
+    else:
+        object_name = str(payload) if payload is not None else ""
+
+    if not object_name:
+        logger.warning("视觉抓取指令缺少目标名称")
+        return
+
+    if task_manager:
+        success = task_manager.request_vision_grasp(object_name)
+        if not success:
+            logger.warning("视觉抓取任务未能成功派发")
+    else:
+        logger.error("任务管理器未初始化，无法处理视觉抓取指令")
 
 
 def start_mqtt_client():
@@ -626,8 +807,8 @@ def start_mqtt_client():
         logger.error(f"连接异常: {str(e)}", exc_info=True)
 
 
-# 全局导航管理器实例
-nav_manager = None
+# 全局任务管理器实例
+task_manager = None
 
 if __name__ == "__main__":
     logger.info("=" * 60)
@@ -639,9 +820,9 @@ if __name__ == "__main__":
     try:
         # 初始化ROS节点
         rospy.init_node('mqtt_navigation_receiver', anonymous=True)
-        # 创建导航管理器
-        nav_manager = NavigationManager()
-        logger.info("导航管理器初始化完成")
+        # 创建任务管理器
+        task_manager = RobotTaskManager()
+        logger.info("任务管理器初始化完成")
 
         # 启动MQTT客户端线程  
         mqtt_thread = threading.Thread(target=start_mqtt_client, name='MQTTThread') 

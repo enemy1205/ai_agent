@@ -9,3 +9,4 @@ test/
 wespeaker/
 speaker_db/
 test_voicebank/
+*.db

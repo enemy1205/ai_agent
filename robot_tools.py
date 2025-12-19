@@ -26,12 +26,13 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
 # MQTT 配置
-MQTT_BROKER = "10.194.142.104"
+MQTT_BROKER = "10.194.105.61"
 MQTT_PORT = 1883
 MQTT_TOPIC_NAVIGATION = "robot/navigation"
 MQTT_TOPIC_ARM_CONTROL = "robot/arm/control"
 MQTT_TOPIC_ARM_COORDINATE = "robot/arm/coordinate"
 MQTT_TOPIC_GRIPPER_CONTROL = "robot/gripper/control"
+MQTT_TOPIC_VISION_GRASP = "robot/vision/grasp"
 
 # ========== MQTT通信函数 ==========
 
@@ -169,6 +170,25 @@ def _send_gripper_command(client, topic, command):
         logger.error(f"MQTT发布未知错误: {e}", exc_info=True)
         return False
 
+def _send_vision_grasp_command(client, topic, target_name):
+    """发送视觉抓取指令 (仅包含目标名称)"""
+    # 构造最简 Payload
+    payload = json.dumps({"object_name": target_name}, ensure_ascii=False)
+    
+    log_mqtt_publish(logger, topic, payload)
+    try:
+        result = client.publish(topic, payload, qos=1)
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            result.wait_for_publish(timeout=2)
+            logger.debug(f"视觉指令发送成功: {target_name}")
+            return True
+        else:
+            logger.error(f"MQTT发布失败: {result.rc}")
+            return False
+    except Exception as e:
+        logger.error(f"MQTT异常: {e}", exc_info=True)
+        return False
+
 
 # ========== 机器人控制工具函数 ==========
 
@@ -302,6 +322,41 @@ def gripper_control(command: int) -> dict:
         return _result(True, f"已发送夹爪『{desc}』指令", {"command": command})
     else:
         return _result(False, "MQTT消息发送失败", {"command": command})
+
+
+
+def vision_grasp(object_name: str) -> dict:
+    """
+    触发视觉感知+抓取姿态估计流程，并将目标物体名称传递给NUC。
+    适用场景：用户明确要求“拿起/夹取/抓取某个物体”但未提供精确坐标，需要视觉协助定位时调用。
+    参数:
+        object_name: 目标物体名称（自然语言描述，必须翻译为英文，如"banana", "water bottle"）
+    返回:
+        {"ok": bool, "text": str, "meta": dict}
+    """
+    if not isinstance(object_name, str) or not object_name.strip():
+        return {"ok": False, "text": "参数错误: object_name 不能为空"}
+
+    object_name = object_name.strip()
+
+    client = connect_mqtt()
+    if client is None:
+        return {"ok": False, "text": "MQTT连接失败"}
+
+    client.loop_start()
+    time.sleep(0.3)
+    
+    # 发送指令
+    success = _send_vision_grasp_command(client, MQTT_TOPIC_VISION_GRASP, object_name)
+    
+    time.sleep(0.3)
+    client.loop_stop()
+    client.disconnect()
+
+    if success:
+        return {"ok": True, "text": f"已发送视觉抓取请求: 目标[{object_name}]", "meta": {"target": object_name}}
+    else:
+        return {"ok": False, "text": "指令发送失败", "meta": {"target": object_name}}
 
 def _load_locations_config() -> dict:
     """加载坐标配置文件 config/locations.json"""
@@ -464,22 +519,6 @@ def get_water_bottle() -> dict:
             return _result(False, "松开夹爪指令发送失败", {"step": "gripper_release"})
         logger.info(f"已发送松开夹爪指令: {GRIPPER_RELEASE_CMD}")
         time.sleep(SEND_WAIT_TIME)
-        # # 步骤1: 导航到指定地点
-        # logger.info("步骤1: 导航到指定地点")
-        # nav_success = _send_navigation(
-        #     client,
-        #     MQTT_TOPIC_NAVIGATION,
-        #     NAV_X,
-        #     NAV_Y,
-        #     NAV_Z,
-        #     NAV_ORIENTATION,
-        # )
-        # if not nav_success:
-        #     return _result(False, "导航指令发送失败", {"step": "navigation"})
-        # logger.info(
-        #     f"已发送导航指令: ({NAV_X}, {NAV_Y}, {NAV_Z}), 朝向: {NAV_ORIENTATION}"
-        # )
-        # time.sleep(SEND_WAIT_TIME)
 
         # 步骤2: 机械臂移动到水瓶抓取位置
         logger.info("步骤2: 机械臂移动到水瓶抓取位置")
@@ -700,17 +739,27 @@ GripperControlTool = StructuredTool.from_function(
 #     ),
 # )
 
-GetWaterBottleTool = StructuredTool.from_function(
-    get_water_bottle,
-    name="get_water_bottle",
+# GetWaterBottleTool = StructuredTool.from_function(
+#     get_water_bottle,
+#     name="get_water_bottle",
+#     description=(
+#         "完整的拿水瓶动作：导航到办公室 → 机械臂移动到水瓶位置 → 夹爪夹取 → 机械臂抬升。"
+#         "使用时机: 用户说'请帮我去拿水瓶'、'去拿瓶水'等需要完整拿水瓶流程时使用。"
+#         "这是一个复合工具，会自动执行完整的拿水瓶流程。"
+#         "返回字段: ok, text, meta。"
+#     ),
+# )
+
+VisionGraspTool = StructuredTool.from_function(
+    vision_grasp,
+    name="vision_detect_and_grasp",
     description=(
-        "完整的拿水瓶动作：导航到办公室 → 机械臂移动到水瓶位置 → 夹爪夹取 → 机械臂抬升。"
-        "使用时机: 用户说'请帮我去拿水瓶'、'去拿瓶水'等需要完整拿水瓶流程时使用。"
-        "这是一个复合工具，会自动执行完整的拿水瓶流程。"
+        "当用户明确提出“拿起/夹取/抓取某个具体物体”且需要视觉定位时使用,一旦确认需要调用视觉识别的功能进行机械臂机械爪操作，就只需要调用本工具，不要调用额外的机械臂机械爪工具。"
+        "功能：向NUC发送视觉识别+抓取姿态估计请求，请求参数 object_name 等于用户提到的物体，object_name要求自然语言描述，必须翻译为英文（比如：“水瓶”翻译为“water bottle”）。"
+        "禁止：如果用户只想移动机械臂或夹爪而未涉及视觉定位，不应调用本工具。"
         "返回字段: ok, text, meta。"
     ),
 )
-
 # ========== 工具列表 ==========
 ALL_TOOLS = [
     ArmControlTool,
@@ -720,7 +769,8 @@ ALL_TOOLS = [
     ComplexTaskTool,
     GripperControlTool,
     # ArmControlCoordinateTool,
-    GetWaterBottleTool
+    # GetWaterBottleTool,
+    VisionGraspTool
 ]
 
 def get_all_tools():
